@@ -283,3 +283,42 @@ def test_dataset_name_literal_includes_known_dataset():
     assert "nz_cpi" in ALL_NAMES
     assert CATALOG_SNAPSHOT_COUNT == len(ALL_NAMES)
     assert CATALOG_SNAPSHOT_COUNT > 100   # sanity floor; current catalog is 717
+
+
+# ---------------------------------------------------------------------------
+# Client.integration() — Enterprise-gated; client-side just relays
+# ---------------------------------------------------------------------------
+
+@resp_lib.activate
+def test_integration_returns_files(client):
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/integrations/meltano",
+                 json={"platform": "meltano",
+                       "files": {"meltano.yml": "config", "README.md": "readme"}},
+                 status=200)
+    files = client.integration("meltano", ["nz_cpi", "nz_gdp"])
+    assert files == {"meltano.yml": "config", "README.md": "readme"}
+
+
+@resp_lib.activate
+def test_integration_passes_comma_separated_datasets(client):
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/integrations/meltano",
+                 json={"platform": "meltano", "files": {}}, status=200)
+    client.integration("meltano", ["nz_cpi", "nz_gdp"])
+    sent = resp_lib.calls[0].request.url
+    assert "datasets=nz_cpi%2Cnz_gdp" in sent or "datasets=nz_cpi,nz_gdp" in sent
+
+
+def test_integration_empty_datasets_raises(client):
+    with pytest.raises(ValueError, match="datasets cannot be empty"):
+        client.integration("meltano", [])
+
+
+@resp_lib.activate
+def test_integration_403_raises_authentication_error_with_server_detail(client):
+    """Non-Enterprise plan returns 403; the server detail must flow through."""
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/integrations/meltano",
+                 json={"detail": "This endpoint is an Enterprise plan feature."},
+                 status=403)
+    with pytest.raises(AuthenticationError) as e:
+        client.integration("meltano", ["nz_cpi"])
+    assert "Enterprise" in str(e.value)

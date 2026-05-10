@@ -111,6 +111,37 @@ class Client:
         return self._get(f"/v1/datasets/{name}")
 
     # ------------------------------------------------------------------
+    # Integrations (Enterprise plan only)
+    # ------------------------------------------------------------------
+
+    def integration(self, platform: str, datasets: list[str]) -> dict[str, str]:
+        """Generate connector config files for a third-party data-pipeline tool.
+
+        Enterprise plan only. Other plans receive an
+        :class:`AuthenticationError` with the upgrade message in the detail.
+
+        Args:
+            platform: One of ``"meltano"``, ``"fivetran"``, ``"azure-data-factory"``.
+            datasets: Dataset names to include in the generated config.
+
+        Returns:
+            ``{filename: file_contents}`` ready to write to disk.
+
+        Examples::
+
+            files = client.integration("meltano", ["nz_cpi", "nz_gdp"])
+            for filename, content in files.items():
+                Path("./tap-eolas") / filename).write_text(content)
+        """
+        if not datasets:
+            raise ValueError("datasets cannot be empty")
+        resp = self._get(
+            f"/v1/integrations/{platform}",
+            params={"datasets": ",".join(datasets)},
+        )
+        return resp.get("files", {})
+
+    # ------------------------------------------------------------------
     # Source-specific helpers
     # ------------------------------------------------------------------
 
@@ -280,7 +311,11 @@ class Client:
         if resp.status_code == 401:
             raise AuthenticationError("Invalid or missing API key.")
         if resp.status_code == 403:
-            raise AuthenticationError("API key is inactive.")
+            try:
+                detail = resp.json().get("detail", "API key is inactive.")
+            except Exception:
+                detail = "API key is inactive."
+            raise AuthenticationError(detail)
         if resp.status_code == 429:
             raise RateLimitError(
                 "Monthly request limit reached. Upgrade for higher limits."

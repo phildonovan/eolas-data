@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "eolas-data"
-version = "1.0.0"
+version = "1.2.0"
 description = "Python client for the eolas.fyi statistical data API (NZ, Australia, OECD)"
 readme = "README.md"
 license = { text = "MIT" }
@@ -35,10 +35,14 @@ Repository = "https://github.com/phildonovan/eolas-data"
 "Bug Tracker" = "https://github.com/phildonovan/eolas-data/issues"
 
 [project.optional-dependencies]
-dev = ["pytest", "responses", "pandas", "geopandas>=0.14", "shapely>=2.0"]
+dev = ["pytest", "responses", "pandas", "geopandas>=0.14", "shapely>=2.0", "typer>=0.12", "rich>=13"]
 polars = ["polars>=0.20"]
 plot = ["matplotlib>=3.5"]
 geo = ["geopandas>=0.14", "shapely>=2.0"]
+cli = ["typer>=0.12", "rich>=13"]
+
+[project.scripts]
+eolas = "eolas_data.cli:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["eolas_data"]
