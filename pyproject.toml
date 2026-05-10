@@ -30,7 +30,7 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://eolas.fyi"
-Documentation = "https://phildonovan.github.io/vswarehouse-docs/"
+Documentation = "https://docs.eolas.fyi/"
 Repository = "https://github.com/phildonovan/eolas-data"
 "Bug Tracker" = "https://github.com/phildonovan/eolas-data/issues"
 
