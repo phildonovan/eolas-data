@@ -166,8 +166,14 @@ class Client:
         return self._get_source(name, "LINZ", **kwargs)
 
     def statsnz_geo(self, name, **kwargs) -> Dataset:
-        """Fetch a Stats NZ Geospatial dataset."""
-        return self._get_source(name, "Stats NZ Geospatial", **kwargs)
+        """Fetch a Stats NZ geospatial dataset (boundaries, census meshblocks, etc.).
+
+        Kept as a convenience helper for discoverability — the server returns
+        ``source = "Stats NZ"`` for both SDMX time series and Datafinder
+        geospatial datasets, so the metadata on the returned Dataset reads
+        ``"Stats NZ"`` (not ``"Stats NZ Geospatial"``).
+        """
+        return self._get_source(name, "Stats NZ", **kwargs)
 
     def mbie(self, name, **kwargs) -> Dataset:
         """Fetch an MBIE dataset."""
