@@ -580,7 +580,7 @@ def integrate_meltano(
     json_out: bool          = typer.Option(False, "--json"),
     api_key:  Optional[str] = typer.Option(None, "--api-key"),
 ) -> None:
-    """Generate a Meltano project (uses `tap-rest-api-msdk`) for the chosen datasets."""
+    """[verified] Generate a Meltano project (uses `tap-rest-api-msdk`) for the chosen datasets."""
     _run_integration("meltano", datasets, output or _default_output_dir("meltano"),
                      force, api_key, json_out)
 
@@ -593,9 +593,20 @@ def integrate_fivetran(
     json_out: bool          = typer.Option(False, "--json"),
     api_key:  Optional[str] = typer.Option(None, "--api-key"),
 ) -> None:
-    """Generate a Fivetran Connector Builder YAML for the chosen datasets."""
+    """[experimental] Generate a Fivetran Connector Builder YAML for the chosen datasets.
+
+    Output is structure-verified (parses as YAML, has all the fields the spec
+    documents) but has not yet been end-to-end tested against a real Fivetran
+    Connector Builder import. If the import rejects with a schema error,
+    please share the error so the generator can be fixed.
+    """
     _run_integration("fivetran", datasets, output or _default_output_dir("fivetran"),
                      force, api_key, json_out)
+    if not _machine_mode(json_out):
+        err_console.print(
+            "[yellow]experimental:[/yellow] Fivetran output is structure-verified "
+            "but not yet end-to-end tested against a real account."
+        )
 
 
 @integrate_app.command("azure-data-factory")
@@ -606,10 +617,21 @@ def integrate_adf(
     json_out: bool          = typer.Option(False, "--json"),
     api_key:  Optional[str] = typer.Option(None, "--api-key"),
 ) -> None:
-    """Generate Azure Data Factory linked-service / dataset / pipeline JSON."""
+    """[experimental] Generate Azure Data Factory linked-service / dataset / pipeline JSON.
+
+    Output is structure-verified (linked-service references resolve, datasets
+    reference real linked services, pipeline activities reference real
+    datasets) but has not yet been end-to-end tested against a real Azure
+    subscription.
+    """
     _run_integration("azure-data-factory", datasets,
                      output or _default_output_dir("adf"),
                      force, api_key, json_out)
+    if not _machine_mode(json_out):
+        err_console.print(
+            "[yellow]experimental:[/yellow] Azure Data Factory output is "
+            "structure-verified but not yet end-to-end tested against a real subscription."
+        )
 
 
 # Allow `python -m eolas_data.cli`
