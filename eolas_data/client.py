@@ -242,6 +242,23 @@ class Client:
         """
         return self._get_source(name, "Manaaki Whenua / LRIS", **kwargs)
 
+    def doc(self, name, **kwargs) -> Dataset:
+        """Fetch a DOC (Department of Conservation) dataset.
+
+        Examples::
+
+            client.doc("doc_public_conservation_land")   # ~11k polygons of NZ public conservation land
+            client.doc("doc_huts")                        # 1,429 DOC huts (Point geometry)
+            client.doc("doc_tracks")                      # 3,248 DOC tracks (Polyline)
+
+        Notes:
+            Refreshed weekly from DOC's ArcGIS hub. Operational alert streams
+            (track closures, hazard notices) are wired but currently blocked on
+            an API key issue; they will appear automatically once resolved.
+            CC-BY 4.0 International (Crown / Department of Conservation).
+        """
+        return self._get_source(name, "DOC", **kwargs)
+
     def _get_source(self, name, source: str, **kwargs) -> Dataset:
         df = self.get(name, **kwargs)
         df.eolas_source = source
