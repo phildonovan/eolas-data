@@ -203,6 +203,29 @@ class Client:
         """Fetch a WorkSafe NZ dataset."""
         return self._get_source(name, "WorkSafe NZ", **kwargs)
 
+    def immigration(self, name, **kwargs) -> Dataset:
+        """Fetch an Immigration NZ dataset."""
+        return self._get_source(name, "Immigration NZ", **kwargs)
+
+    def lris(self, name, **kwargs) -> Dataset:
+        """Fetch a Manaaki Whenua LRIS dataset (land cover, soil, protected areas).
+
+        Examples::
+
+            client.lris("lcdb_v6_mainland")   # current NZ land cover (~543k polygons)
+            client.lris("nzlum_v03")           # NZ Land Use Management v0.3
+            client.lris("pan_nz_2025_draft")   # protected areas (Draft, 2025)
+
+        Notes:
+            LCDB v3.0–v4.1 are deprecated vintages, retained for longitudinal
+            analysis. LCDB v5 is superseded by v6 but still served.
+            PAN-NZ 2025 was marked Draft at the time of ingestion (2026-05-12).
+            Source: https://lris.scinfo.org.nz
+            Licence: CC-BY 4.0 International (LCDB v5/v6, NZLUM, PBC, PAN-NZ);
+            CC-BY 3.0 NZ (LCDB v3/v4 vintages). Attribution: Manaaki Whenua.
+        """
+        return self._get_source(name, "Manaaki Whenua / LRIS", **kwargs)
+
     def _get_source(self, name, source: str, **kwargs) -> Dataset:
         df = self.get(name, **kwargs)
         df.eolas_source = source
