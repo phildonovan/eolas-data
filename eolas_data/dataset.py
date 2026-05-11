@@ -29,38 +29,18 @@ class Dataset(pd.DataFrame):
             return header + pd.DataFrame.__repr__(self)
         return pd.DataFrame.__repr__(self)
 
-    def plot_dataset(self, ax=None, **kwargs):
-        """Quick line chart using matplotlib.
-
-        Returns the matplotlib Axes object so you can customise further.
-        Requires matplotlib: ``pip install eolas-data[plot]``.
-        """
-        try:
-            import matplotlib.pyplot as plt
-        except ImportError:
-            raise ImportError(
-                "matplotlib is required for plot_dataset(). "
-                "Install with: pip install eolas-data[plot]"
-            )
-
-        date_col  = "date"  if "date"  in self.columns else self.columns[0]
-        value_col = "value" if "value" in self.columns else self.columns[1]
-
-        if ax is None:
-            _, ax = plt.subplots(figsize=(10, 4))
-
-        ax.plot(self[date_col], self[value_col], color="#2563eb", linewidth=1.5, **kwargs)
-
-        name   = getattr(self, "eolas_name",   "") or ""
-        source = getattr(self, "eolas_source", "") or ""
-
-        if name:
-            ax.set_title(name, fontweight="bold", fontsize=13)
-        ax.set_xlabel("")
-        ax.spines[["top", "right"]].set_visible(False)
-
-        caption = f"Source: {source} · eolas.fyi" if source else "eolas.fyi"
-        ax.figure.text(0.99, 0.01, caption, ha="right", fontsize=8, color="#9ca3af")
-
-        plt.tight_layout()
-        return ax
+    # ------------------------------------------------------------------
+    # plot_dataset() was removed in v1.3.0.
+    #
+    # It auto-picked `date` and `value` columns and drew a single matplotlib
+    # line — but datasets with a dimension column (multiple series per date)
+    # produced silent zigzag traces. Rather than ship a helper that has to
+    # know each dataset's shape, plotting is now the caller's responsibility.
+    # `Dataset` subclasses `DataFrame`, so any matplotlib / seaborn / plotly
+    # workflow works straight out of the box:
+    #
+    #     import matplotlib.pyplot as plt
+    #     df.plot(x="date", y="value")
+    #
+    # See README for one-liners.
+    # ------------------------------------------------------------------

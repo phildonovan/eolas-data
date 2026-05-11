@@ -124,13 +124,17 @@ df = client.get("nz_cpi", engine="polars")
 
 ## Plotting
 
-```bash
-pip install eolas-data[plot]
-```
+`Dataset` is a `pandas.DataFrame` subclass — use matplotlib / seaborn / plotly
+directly. No bundled plot helper, because there's no universal "right" plot for
+a tidy dataset (single-series time series vs. wide multi-measure vs. WKT
+geometry all need different code).
 
 ```python
+import matplotlib.pyplot as plt
+
 df = client.statsnz("nz_cpi")
-df.plot_dataset()
+df.plot(x="date", y="value")
+plt.show()
 ```
 
 ## Type stubs
@@ -154,7 +158,7 @@ The previous package name was `vswarehouse`. Direct equivalents:
 |---|---|
 | `from vswarehouse import Client, VSeries` | `from eolas_data import Client, Dataset` |
 | `df.vs_name`, `df.vs_source` | `df.eolas_name`, `df.eolas_source` |
-| `df.plot_series()` | `df.plot_dataset()` |
+| `df.plot_series()` | *(removed in v1.3.0 — use `df.plot(x="date", y="value")` directly; the helper silently mis-rendered datasets with multi-row dates)* |
 | `VS_API_KEY` env var | `EOLAS_API_KEY` (legacy `VS_API_KEY` still honoured) |
 
 The API surface is otherwise identical. The default base URL is now `https://api.eolas.fyi` (the old `https://api.virtus-solutions.io` still 301-redirects and works fine — but uses the legacy endpoint shape).
