@@ -271,6 +271,11 @@ class Client:
             if "date" in df.columns:
                 df["date"] = pd.to_datetime(df["date"])
 
+        # API streams from Iceberg in file order, not chronological — sort here so
+        # callers can `df.plot(x="date", y="value")` without seeing zigzag lines.
+        if "date" in df.columns:
+            df = df.sort_values("date", kind="stable").reset_index(drop=True)
+
         result = Dataset(df)
         result.eolas_name   = name
         result.eolas_source = ""

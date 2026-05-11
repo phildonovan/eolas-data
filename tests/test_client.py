@@ -102,6 +102,19 @@ def test_get_returns_dataset(client):
 
 
 @resp_lib.activate
+def test_get_sorts_rows_by_date(client):
+    # API streams Iceberg in file order, not chronological — client must sort.
+    unsorted = [
+        {"date": "2023-04-01", "period": "2023Q2", "value": 101.5},
+        {"date": "2022-01-01", "period": "2022Q1", "value": 99.0},
+        {"date": "2023-01-01", "period": "2023Q1", "value": 100.0},
+    ]
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi/data", json={"data": unsorted})
+    df = client.get("nz_cpi")
+    assert list(df["date"].dt.strftime("%Y-%m-%d")) == ["2022-01-01", "2023-01-01", "2023-04-01"]
+
+
+@resp_lib.activate
 def test_get_passes_date_params(client):
     resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi/data", json={"data": RECORDS})
     client.get("nz_cpi", start="2023-01-01", end="2023-06-30")
