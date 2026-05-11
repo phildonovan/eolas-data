@@ -207,6 +207,22 @@ class Client:
         """Fetch an Immigration NZ dataset."""
         return self._get_source(name, "Immigration NZ", **kwargs)
 
+    def geonet(self, name, **kwargs) -> Dataset:
+        """Fetch a GeoNet dataset (NZ earthquakes, volcanic alert levels, strong-motion sensors).
+
+        Examples::
+
+            client.geonet("geonet_quakes_recent")              # rolling ~100 recent MMI>=3 quakes
+            client.geonet("geonet_volcanic_alert_levels")      # 12 monitored NZ volcanoes
+            client.geonet("geonet_strong_motion_sensors")      # 25 strong-motion stations
+
+        Notes:
+            Refreshed every 6 hours from api.geonet.org.nz. Earthquake catalogue is a
+            rolling window of recent events, not a historical archive. CC-BY 3.0 NZ
+            (Earth Sciences New Zealand, formerly GNS Science).
+        """
+        return self._get_source(name, "GeoNet", **kwargs)
+
     def lris(self, name, **kwargs) -> Dataset:
         """Fetch a Manaaki Whenua LRIS dataset (land cover, soil, protected areas).
 
