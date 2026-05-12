@@ -2,7 +2,7 @@
 Type stubs for dataset names.
 
 Auto-generated from https://api.eolas.fyi/v1/datasets at release time.
-Snapshot: 2026-05-12 (1409 datasets).
+Snapshot: 2026-05-12 (1406 datasets).
 Regenerate before each release with `python -m eolas_data._regen_names`.
 
 At runtime this is just a string — `Literal[...]` only constrains static type
@@ -12,7 +12,7 @@ it just doesn't autocomplete.
 from typing import Literal
 
 CATALOG_SNAPSHOT_DATE = "2026-05-12"
-CATALOG_SNAPSHOT_COUNT = 1409
+CATALOG_SNAPSHOT_COUNT = 1406
 
 DatasetName = Literal[
     'acc_achilles_tendon_ruptures',
@@ -277,18 +277,13 @@ DatasetName = Literal[
     'dcc_significant_trees',
     'dcc_tree_heritage_2gp',
     'doc_campsites',
-    'doc_freedom_camping_sites',
-    'doc_hauraki_gulf_marine_protection',
     'doc_huts',
+    'doc_marine_mammal_sanctuaries',
     'doc_marine_reserves',
-    'doc_mountain_bike_tracks',
-    'doc_offices',
     'doc_public_conservation_land',
-    'doc_recreational_hunting_permit_areas',
-    'doc_roads',
-    'doc_threatened_freshwater_invertebrates',
     'doc_tracks',
-    'doc_walking_experiences',
+    'doc_walking_experiences_locations',
+    'doc_walking_experiences_routes',
     'ecan_active_resource_consent_points',
     'ecan_aerial_imagery_extents',
     'ecan_clean_air_zones',
@@ -1015,6 +1010,8 @@ DatasetName = Literal[
     'odc_designated_areas',
     'odc_marae_locations',
     'oil_monthly_stats',
+    'operational_alerts_campsites',
+    'operational_alerts_huts',
     'opotiki_coastal_hazard_ohiwa',
     'opotiki_designated_site',
     'opotiki_district_plan_zones',
@@ -1689,18 +1686,13 @@ ALL_NAMES: tuple[str, ...] = (
     'dcc_significant_trees',
     'dcc_tree_heritage_2gp',
     'doc_campsites',
-    'doc_freedom_camping_sites',
-    'doc_hauraki_gulf_marine_protection',
     'doc_huts',
+    'doc_marine_mammal_sanctuaries',
     'doc_marine_reserves',
-    'doc_mountain_bike_tracks',
-    'doc_offices',
     'doc_public_conservation_land',
-    'doc_recreational_hunting_permit_areas',
-    'doc_roads',
-    'doc_threatened_freshwater_invertebrates',
     'doc_tracks',
-    'doc_walking_experiences',
+    'doc_walking_experiences_locations',
+    'doc_walking_experiences_routes',
     'ecan_active_resource_consent_points',
     'ecan_aerial_imagery_extents',
     'ecan_clean_air_zones',
@@ -2427,6 +2419,8 @@ ALL_NAMES: tuple[str, ...] = (
     'odc_designated_areas',
     'odc_marae_locations',
     'oil_monthly_stats',
+    'operational_alerts_campsites',
+    'operational_alerts_huts',
     'opotiki_coastal_hazard_ohiwa',
     'opotiki_designated_site',
     'opotiki_district_plan_zones',
