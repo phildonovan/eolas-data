@@ -74,10 +74,9 @@ err_console = Console(stderr=True)
 
 def _load_api_key() -> str:
     """Resolve the API key. Precedence: env var → config file → empty."""
-    for var in ("EOLAS_API_KEY", "VS_API_KEY"):
-        v = os.getenv(var)
-        if v:
-            return v
+    v = os.getenv("EOLAS_API_KEY")
+    if v:
+        return v
     if CONFIG_FILE.exists():
         try:
             return json.loads(CONFIG_FILE.read_text()).get("api_key", "")
@@ -322,11 +321,10 @@ def auth_set_key(
 @auth_app.command("status")
 def auth_status() -> None:
     """Show the resolved API key (masked) and which source supplied it."""
-    for var in ("EOLAS_API_KEY", "VS_API_KEY"):
-        v = os.getenv(var)
-        if v:
-            typer.echo(f"key:    {_mask(v)}\nsource: env {var}")
-            return
+    v = os.getenv("EOLAS_API_KEY")
+    if v:
+        typer.echo(f"key:    {_mask(v)}\nsource: env EOLAS_API_KEY")
+        return
     if CONFIG_FILE.exists():
         try:
             k = json.loads(CONFIG_FILE.read_text()).get("api_key", "")

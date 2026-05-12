@@ -50,8 +50,7 @@ class Client:
     """Client for the eolas.fyi statistical data API.
 
     Args:
-        api_key:  Your API key. Falls back to the ``EOLAS_API_KEY`` env var
-                  (or ``VS_API_KEY`` for back-compat with the legacy library).
+        api_key:  Your API key. Falls back to the ``EOLAS_API_KEY`` env var.
         base_url: Override the API base URL (useful for testing).
         cache:    Cache responses in memory for the lifetime of the client.
                   Useful in notebooks to avoid re-fetching on re-runs.
@@ -79,7 +78,7 @@ class Client:
         base_url: str = BASE_URL,
         cache: bool = False,
     ):
-        self._key   = api_key or os.getenv("EOLAS_API_KEY") or os.getenv("VS_API_KEY") or ""
+        self._key   = api_key or os.getenv("EOLAS_API_KEY") or ""
         self._base  = base_url.rstrip("/")
         self._cache: dict | None = {} if cache else None
         self._session = requests.Session()

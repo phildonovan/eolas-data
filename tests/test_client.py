@@ -265,25 +265,9 @@ def test_rate_limit_raises(client):
 # ---------------------------------------------------------------------------
 
 def test_key_from_env(monkeypatch):
-    monkeypatch.delenv("VS_API_KEY", raising=False)
     monkeypatch.setenv("EOLAS_API_KEY", "eolas_from_env")
     c = Client()
     assert c._key == "eolas_from_env"
-
-
-def test_key_from_legacy_env(monkeypatch):
-    """Back-compat with VS_API_KEY (the legacy vswarehouse env var)."""
-    monkeypatch.delenv("EOLAS_API_KEY", raising=False)
-    monkeypatch.setenv("VS_API_KEY", "vs_from_env")
-    c = Client()
-    assert c._key == "vs_from_env"
-
-
-def test_eolas_key_takes_precedence_over_legacy(monkeypatch):
-    monkeypatch.setenv("EOLAS_API_KEY", "eolas_wins")
-    monkeypatch.setenv("VS_API_KEY", "vs_loses")
-    c = Client()
-    assert c._key == "eolas_wins"
 
 
 # ---------------------------------------------------------------------------

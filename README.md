@@ -150,19 +150,6 @@ client.get("nz_")    # autocomplete shows nz_cpi, nz_gdp_production_annual, ...
 
 The list is regenerated from the live API at release time. Passing a name not in the snapshot still works at runtime — the type hint just won't autocomplete it. Catalog snapshot date is exposed as `eolas_data._dataset_names.CATALOG_SNAPSHOT_DATE`.
 
-## Migrating from `vswarehouse`
-
-The previous package name was `vswarehouse`. Direct equivalents:
-
-| `vswarehouse` | `eolas_data` |
-|---|---|
-| `from vswarehouse import Client, VSeries` | `from eolas_data import Client, Dataset` |
-| `df.vs_name`, `df.vs_source` | `df.eolas_name`, `df.eolas_source` |
-| `df.plot_series()` | *(removed in v1.3.0 — use `df.plot(x="date", y="value")` directly; the helper silently mis-rendered datasets with multi-row dates)* |
-| `VS_API_KEY` env var | `EOLAS_API_KEY` (legacy `VS_API_KEY` still honoured) |
-
-The API surface is otherwise identical. The default base URL is now `https://api.eolas.fyi` (the old `https://api.virtus-solutions.io` still 301-redirects and works fine — but uses the legacy endpoint shape).
-
 ## Releasing
 
 See [`docs/clients.md`](https://github.com/phildonovan/eolas/blob/master/docs/clients.md) in the eolas data repo for the tagged-release flow and PyPI token rotation.
