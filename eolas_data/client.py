@@ -198,6 +198,23 @@ class Client:
         """Fetch an Education Counts dataset."""
         return self._get_source(name, "Education Counts", **kwargs)
 
+    def eeca(self, name, **kwargs) -> Dataset:
+        """Fetch an EECA dataset (NZ energy use, EV chargers, regional heat demand).
+
+        Examples::
+
+            client.eeca("eeca_energy_end_use")           # NZ energy by sector x fuel x end-use x year
+            client.eeca("eeca_ev_chargers_public")       # public EV charging network (point geometry)
+            client.eeca("eeca_ev_metrics_district")      # EV penetration by territorial authority
+            client.eeca("eeca_regional_heat_demand")     # industrial process heat by region x sector
+
+        Notes:
+            From the Energy Efficiency and Conservation Authority. EV charger streams
+            refresh quarterly; Energy End Use Database is annual; Regional Heat Demand
+            is an Aug 2024 snapshot. CC-BY 4.0 NZ.
+        """
+        return self._get_source(name, "EECA", **kwargs)
+
     def worksafe(self, name, **kwargs) -> Dataset:
         """Fetch a WorkSafe NZ dataset."""
         return self._get_source(name, "WorkSafe NZ", **kwargs)
