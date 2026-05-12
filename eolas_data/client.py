@@ -449,6 +449,24 @@ class Client:
         """
         return self._get_source(name, "Otago Councils", **kwargs)
 
+    def pharmac(self, name, **kwargs) -> Dataset:
+        """Fetch a PHARMAC dataset (NZ pharmaceutical subsidy schedule + hospital medicines).
+
+        Examples::
+
+            client.pharmac("pharmac_schedule")             # current month's funded medicines
+            client.pharmac("pharmac_schedule_history")     # 2006-present subsidy archive
+            client.pharmac("pharmac_hospital_medicines_list")  # current HML
+            client.pharmac("pharmac_hml_history")          # 2011-present HML archive
+
+        Notes:
+            Monthly snapshots of NZ's national drug funding schedule + hospital
+            formulary, from PHARMAC (Pharmaceutical Management Agency).
+            Historical archives are append-mode — each month's snapshot is tagged
+            with ``time_frame`` (YYYY-MM). CC-BY 3.0 NZ.
+        """
+        return self._get_source(name, "PHARMAC", **kwargs)
+
     def southland(self, name, **kwargs) -> Dataset:
         """Fetch a Southland Councils dataset (district plans, coastal, natural hazards).
 
