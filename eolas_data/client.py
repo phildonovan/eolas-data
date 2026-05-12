@@ -259,6 +259,287 @@ class Client:
         """
         return self._get_source(name, "DOC", **kwargs)
 
+    def akl_council(self, name, **kwargs) -> Dataset:
+        """Fetch an Auckland Council dataset (overlays, heritage, hazards, zoning).
+
+        Examples::
+
+            client.akl_council("akc_notable_trees_overlay")
+            client.akl_council("akc_significant_ecological_areas_overlay")
+            client.akl_council("akc_historic_heritage_overlay_place")
+
+        Notes:
+            Open data from the Auckland Council ArcGIS hub. Covers district
+            plan overlays, heritage areas, ecological areas, stormwater
+            management zones, and more. CC-BY 4.0 (Auckland Council).
+            Source: https://data-aucklandcouncil.opendata.arcgis.com
+        """
+        return self._get_source(name, "Auckland Council", **kwargs)
+
+    def akl_transport(self, name, **kwargs) -> Dataset:
+        """Fetch an Auckland Transport dataset (roads, public transport, cycling).
+
+        Examples::
+
+            client.akl_transport("akt_bus_stop")
+            client.akl_transport("akt_bus_route")
+            client.akl_transport("akt_cycle_facility_network")
+
+        Notes:
+            Open data from Auckland Transport (AT). Covers bus stops,
+            bus routes, bridges, cycle infrastructure, and more.
+            CC-BY 4.0 (Auckland Transport).
+            Source: https://data-atgis.opendata.arcgis.com
+        """
+        return self._get_source(name, "Auckland Transport", **kwargs)
+
+    def bay_of_plenty(self, name, **kwargs) -> Dataset:
+        """Fetch a Bay of Plenty Councils dataset (hazards, resource consents, planning).
+
+        Examples::
+
+            client.bay_of_plenty("boprc_historic_flood_extents")
+            client.bay_of_plenty("boprc_liquefaction_level_b")
+            client.bay_of_plenty("boprc_rcep_ascv")
+
+        Notes:
+            Open data from Bay of Plenty Regional Council and its territorial
+            authorities. Covers flood extents, liquefaction, coastal hazards,
+            resource consents, and planning layers. CC-BY 4.0.
+            Source: https://www.boprc.govt.nz
+        """
+        return self._get_source(name, "Bay of Plenty Councils", **kwargs)
+
+    def charities(self, name, **kwargs) -> Dataset:
+        """Fetch a Charities Services dataset (registered NZ charities).
+
+        Examples::
+
+            client.charities("charities_organisations")
+            client.charities("charities_annual_returns")
+            client.charities("charities_activities")
+
+        Notes:
+            Data from Charities Services (a business unit of the Department
+            of Internal Affairs). Covers registered charities, officers,
+            beneficiary groups, and annual financial returns.
+            Open Government Licence v3.0.
+            Source: https://www.charities.govt.nz
+        """
+        return self._get_source(name, "Charities Services", **kwargs)
+
+    def colab_waikato(self, name, **kwargs) -> Dataset:
+        """Fetch a Co-Lab Waikato dataset (planning, hazards, heritage across Waikato councils).
+
+        Examples::
+
+            client.colab_waikato("wmkdc_buildings")
+            client.colab_waikato("tcdc_dp_coastal_environment")
+            client.colab_waikato("wbopdc_coastal_erosion")
+
+        Notes:
+            Data aggregated via the Co-Lab Waikato open data hub. Covers
+            district plan zones, coastal hazards, heritage, and building
+            footprints across Waikato-region territorial authorities.
+            CC-BY 4.0 (respective councils).
+            Source: https://data-waikatolass.opendata.arcgis.com
+        """
+        return self._get_source(name, "Co-Lab Waikato", **kwargs)
+
+    def ecan_canterbury(self, name, **kwargs) -> Dataset:
+        """Fetch an ECan / Canterbury dataset (environment, hazards, resource consents).
+
+        Examples::
+
+            client.ecan_canterbury("ecan_liquefaction_susceptibility_final")
+            client.ecan_canterbury("ecan_tsunami_evacuation_zones")
+            client.ecan_canterbury("ecan_resource_consents_active_all")
+
+        Notes:
+            Open data from Environment Canterbury (ECan) and Canterbury-region
+            councils. Covers liquefaction, earthquake faults, tsunami zones,
+            water allocation, resource consents, and planning layers.
+            CC-BY 4.0 (Environment Canterbury / respective councils).
+            Source: https://opendata.canterburymaps.govt.nz
+        """
+        return self._get_source(name, "ECan / Canterbury", **kwargs)
+
+    def hawkes_bay(self, name, **kwargs) -> Dataset:
+        """Fetch a Hawke's Bay Councils dataset (hazards, planning, coastal management).
+
+        Examples::
+
+            client.hawkes_bay("hbrc_coastal_erosion_likely_66")
+            client.hawkes_bay("hbrc_coastal_erosion_possible_33")
+            client.hawkes_bay("hbrc_chb_hdc_wdc_liquefaction_severity")
+
+        Notes:
+            Open data from Hawke's Bay Regional Council and its territorial
+            authorities. Covers coastal erosion, liquefaction, flood hazards,
+            and district planning layers. CC-BY 4.0.
+            Source: https://www.hbrc.govt.nz
+        """
+        return self._get_source(name, "Hawke's Bay Councils", **kwargs)
+
+    def manawatu_whanganui(self, name, **kwargs) -> Dataset:
+        """Fetch a Manawatu-Whanganui Councils dataset (airsheds, coastal, freshwater).
+
+        Examples::
+
+            client.manawatu_whanganui("horizons_coastal_marine_area")
+            client.manawatu_whanganui("horizons_airshed_taihape")
+            client.manawatu_whanganui("horizons_airshed_taumarunui")
+
+        Notes:
+            Open data from Horizons Regional Council (Manawatu-Whanganui) and
+            its territorial authorities. Covers airsheds, coastal marine areas,
+            freshwater, and planning layers. CC-BY 4.0.
+            Source: https://www.horizons.govt.nz
+        """
+        return self._get_source(name, "Manawatu-Whanganui Councils", **kwargs)
+
+    def napier_whanganui(self, name, **kwargs) -> Dataset:
+        """Fetch a Napier or Whanganui city dataset (district plan, heritage, infrastructure).
+
+        Examples::
+
+            client.napier_whanganui("napier_heritage_buildings")
+            client.napier_whanganui("napier_address_points")
+            client.napier_whanganui("napier_parcels")
+
+        Notes:
+            Open data from Napier City Council and Whanganui District Council.
+            Covers district plan precincts, heritage buildings and areas,
+            address points, road centrelines, and parcels. CC-BY 4.0.
+            Source: https://www.napier.govt.nz / https://www.whanganui.govt.nz
+        """
+        return self._get_source(name, "Napier + Whanganui", **kwargs)
+
+    def northland(self, name, **kwargs) -> Dataset:
+        """Fetch a Northland Councils dataset (district plans, designations, heritage).
+
+        Examples::
+
+            client.northland("fndc_district_plan_zones")
+            client.northland("fndc_heritage_areas")
+            client.northland("fndc_designations")
+
+        Notes:
+            Open data from Northland Regional Council and its territorial
+            authorities (Far North, Whangarei, Kaipara). Covers district plan
+            zones, designations, heritage, and environmental layers. CC-BY 4.0.
+            Source: https://www.nrc.govt.nz
+        """
+        return self._get_source(name, "Northland Councils", **kwargs)
+
+    def otago(self, name, **kwargs) -> Dataset:
+        """Fetch an Otago Councils dataset (land use, water, planning, hazards).
+
+        Examples::
+
+            client.otago("orc_otago_irrigated_areas")
+            client.otago("orc_otago_land_use_2024")
+            client.otago("orc_floodbanks")
+
+        Notes:
+            Open data from Otago Regional Council and its territorial
+            authorities (Dunedin, Queenstown-Lakes, Central Otago, Clutha,
+            Waitaki). Covers land use, floodbanks, groundwater protection,
+            and planning layers. CC-BY 4.0.
+            Source: https://www.orc.govt.nz
+        """
+        return self._get_source(name, "Otago Councils", **kwargs)
+
+    def southland(self, name, **kwargs) -> Dataset:
+        """Fetch a Southland Councils dataset (district plans, coastal, natural hazards).
+
+        Examples::
+
+            client.southland("sdc_southland_dp_zones")
+            client.southland("sdc_southland_dp_heritage_items")
+            client.southland("es_southland_land_use_2025")
+
+        Notes:
+            Open data from Environment Southland and its territorial
+            authorities (Southland District, Gore, Invercargill). Covers
+            district plan zones, coastal hazards, heritage, and land use.
+            CC-BY 4.0.
+            Source: https://www.es.govt.nz
+        """
+        return self._get_source(name, "Southland Councils", **kwargs)
+
+    def taranaki(self, name, **kwargs) -> Dataset:
+        """Fetch a Taranaki Councils dataset (coastal, biodiversity, district plans).
+
+        Examples::
+
+            client.taranaki("trc_biodiversity_coastal_mgmt_areas")
+            client.taranaki("npdc_dp_operative_coastal_flooding")
+            client.taranaki("npdc_dp_operative_archaeological")
+
+        Notes:
+            Open data from Taranaki Regional Council and its territorial
+            authorities (New Plymouth, Stratford, South Taranaki). Covers
+            biodiversity, coastal management, and district planning layers.
+            CC-BY 4.0.
+            Source: https://www.trc.govt.nz
+        """
+        return self._get_source(name, "Taranaki Councils", **kwargs)
+
+    def top_of_south(self, name, **kwargs) -> Dataset:
+        """Fetch a Gisborne / Top of South Councils dataset (coastal, planning, heritage).
+
+        Examples::
+
+            client.top_of_south("gdc_coastal_environment")
+            client.top_of_south("gdc_coastal_erosion")
+            client.top_of_south("gdc_coastal_flooding")
+
+        Notes:
+            Open data from Gisborne District Council, Marlborough District
+            Council, Nelson City Council, and Tasman District Council.
+            Covers coastal hazards, planning zones, and heritage layers.
+            CC-BY 4.0.
+            Source: https://www.gdc.govt.nz
+        """
+        return self._get_source(name, "Gisborne / Top of South Councils", **kwargs)
+
+    def wellington(self, name, **kwargs) -> Dataset:
+        """Fetch a Wellington Region Councils dataset (hazards, planning, infrastructure).
+
+        Examples::
+
+            client.wellington("wcc_district_plan_zones_2024")
+            client.wellington("wcc_flood_hazard_operative")
+            client.wellington("gwrc_flood_hazard_extents")
+
+        Notes:
+            Open data from Greater Wellington Regional Council and its
+            territorial authorities (Wellington, Hutt, Upper Hutt, Porirua,
+            Kapiti Coast). Covers flood and earthquake hazards, district plan
+            zones, and coastal inundation. CC-BY 4.0.
+            Source: https://www.gw.govt.nz
+        """
+        return self._get_source(name, "Wellington Region Councils", **kwargs)
+
+    def west_coast(self, name, **kwargs) -> Dataset:
+        """Fetch a West Coast (Te Tai o Poutini) dataset (faults, landslides, planning).
+
+        Examples::
+
+            client.west_coast("wcrc_active_faults")
+            client.west_coast("wcrc_alpine_fault_traces")
+            client.west_coast("wcrc_landslide_catalog")
+
+        Notes:
+            Open data from West Coast Regional Council (Te Tai o Poutini) and
+            its territorial authorities (Buller, Grey, Westland). Covers
+            active faults, the Alpine Fault, landslide catalogs, and
+            significant natural areas. CC-BY 4.0.
+            Source: https://www.ttpp.nz
+        """
+        return self._get_source(name, "West Coast (Te Tai o Poutini)", **kwargs)
+
     def _get_source(self, name, source: str, **kwargs) -> Dataset:
         df = self.get(name, **kwargs)
         df.eolas_source = source

@@ -3,7 +3,7 @@ from .client import Client
 from .dataset import Dataset
 from .exceptions import APIError, AuthenticationError, EolasError, NotFoundError, RateLimitError
 
-__version__ = "1.7.0"
+__version__ = "1.8.0"
 
 __all__ = [
     "Client",
