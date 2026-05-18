@@ -20,7 +20,7 @@ df = client.get("nz_cpi", start="2020-01-01")
 
 # Source-specific (sets the `eolas_source` metadata)
 df = client.statsnz("nz_cpi")
-df = client.oecd("nz_gdp_production_annual")
+df = client.oecd("nz_gdp_growth")
 
 # Discovery
 all_datasets = client.list()
@@ -51,7 +51,7 @@ eolas datasets preview nz_cpi --limit 5
 # fetch (verb matches the Python lib's client.get())
 eolas get nz_cpi --format csv > cpi.csv
 eolas get nz_cpi --start 2020-01-01 --format json | jq '.[].value'
-eolas get sa2_2023 --format parquet --out sa2.parquet
+eolas get nz_meshblock_2023 --format parquet --out sa2.parquet
 ```
 
 ### Scheduling
@@ -61,8 +61,8 @@ on Linux, macOS (cron), and Windows (Task Scheduler).
 
 ```bash
 eolas schedule add nz_cpi --daily   --out ~/data/cpi.csv
-eolas schedule add nz_gdp --weekly  --out ~/data/gdp.csv
-eolas schedule add nzd_usd --cron "0 */6 * * *" --out ~/data/fx.csv   # POSIX only
+eolas schedule add nz_gdp_growth --weekly  --out ~/data/gdp.csv
+eolas schedule add rbnz_b1_exchange_rates_monthly --cron "0 */6 * * *" --out ~/data/fx.csv   # POSIX only
 
 eolas schedule list
 eolas schedule remove nz_cpi
@@ -77,9 +77,9 @@ Generate ready-to-run connector configs for popular data-pipeline tools — eola
 becomes a one-command source for Meltano, Fivetran, or Azure Data Factory.
 
 ```bash
-eolas integrate meltano             --datasets nz_cpi,nz_gdp --output ./my-pipeline/
+eolas integrate meltano             --datasets nz_cpi,nz_gdp_growth --output ./my-pipeline/
 eolas integrate fivetran            --datasets nz_cpi
-eolas integrate azure-data-factory  --datasets nz_cpi,nz_gdp
+eolas integrate azure-data-factory  --datasets nz_cpi,nz_gdp_growth
 ```
 
 The generated directory has everything needed to plug into your destination
@@ -159,7 +159,7 @@ Dataset names are exposed as a `Literal` so IDEs autocomplete the catalog:
 from eolas_data import Client
 
 client = Client()
-client.get("nz_")    # autocomplete shows nz_cpi, nz_gdp_production_annual, ...
+client.get("nz_")    # autocomplete shows nz_cpi, nz_gdp_growth, ...
 ```
 
 The list is regenerated from the live API at release time. Passing a name not in the snapshot still works at runtime — the type hint just won't autocomplete it. Catalog snapshot date is exposed as `eolas_data._dataset_names.CATALOG_SNAPSHOT_DATE`.
