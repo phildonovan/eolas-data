@@ -1,6 +1,8 @@
 # eolas-data
 
-Python client for the [eolas.fyi](https://eolas.fyi) statistical data API — 717+ datasets across NZ, Australia, OECD, and more, served as tidy `pandas` DataFrames (or `polars` / `geopandas` if you prefer).
+Python client for the [eolas.fyi](https://eolas.fyi) statistical data API — 1,400+ official New Zealand statistical & geospatial datasets, plus OECD data for international comparisons, served as tidy `pandas` DataFrames (or `polars` / `geopandas` if you prefer).
+
+_Coverage is New Zealand + OECD today. Australian sources are on the roadmap — not yet available; OECD data already includes Australia (and other OECD members) for cross-country comparisons._
 
 ```bash
 pip install eolas-data
@@ -26,7 +28,7 @@ nz_only      = client.list("Stats NZ")
 meta         = client.info("nz_cpi")
 ```
 
-Get an API key at <https://eolas.fyi/signup>. Free plan is 10 requests/month; Starter is 100; Pro is unlimited.
+Get an API key at <https://eolas.fyi/signup>. Free plan is 10 requests/month; Pro ($49/month) is unlimited.
 
 ## Command-line interface
 
@@ -98,6 +100,18 @@ Distinct exit codes per error class, for shell scripts and agents:
 | `4`  | Dataset / resource not found |
 | `5`  | Other API error |
 | `64` | Bad usage (mirrors `sysexits.h`) |
+
+## Performance (Arrow)
+
+`client.get()` transparently negotiates **Apache Arrow** over the wire — same
+`DataFrame` back, typically **5–10× faster end-to-end** on large pulls, with
+an automatic JSON fallback. No setup: `pyarrow` ships with `eolas-data`, so
+this is on by default; `format=` (`"json"`/`"csv"`) is only for the rare case
+you want the raw text payload.
+
+For a columnar file (CLI), use `--format parquet --out FILE`; via the REST
+API directly, `?format=parquet`. Full benchmark: [docs.eolas.fyi → Python
+reference → Performance](https://docs.eolas.fyi/python/reference/).
 
 ## Geospatial
 

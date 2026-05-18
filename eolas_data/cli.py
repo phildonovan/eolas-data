@@ -49,8 +49,9 @@ EXIT_USAGE           = 64  # convention from sysexits.h
 app           = typer.Typer(
     name="eolas",
     help=(
-        "CLI for the eolas.fyi statistical data API. Browse and fetch 700+ NZ, "
-        "Australian, and OECD datasets. Pipes cleanly into jq, csvkit, etc."
+        "CLI for the eolas.fyi statistical data API. Browse and fetch 1,400+ "
+        "official NZ statistical & geospatial datasets, plus OECD data for "
+        "international comparisons. Pipes cleanly into jq, csvkit, etc."
     ),
     no_args_is_help=True,
     add_completion=True,
@@ -257,7 +258,7 @@ def get_cmd(
     name:    str,
     start:   Optional[str]  = typer.Option(None, "--start",            help="ISO date lower bound, e.g. 2020-01-01."),
     end:     Optional[str]  = typer.Option(None, "--end",              help="ISO date upper bound."),
-    limit:   Optional[int]  = typer.Option(None, "--limit", "-n",      help="Max rows. Default: full dataset (Pro) or plan cap (Free/Starter)."),
+    limit:   Optional[int]  = typer.Option(None, "--limit", "-n",      help="Max rows. Default: full dataset (Pro) or the 50,000-row Free cap."),
     fmt:     str            = typer.Option("csv", "--format", "-f",    help="Output format: csv | json | parquet."),
     out:     Optional[Path] = typer.Option(None, "--out", "-o",        help="Write to file. Default: stdout."),
     api_key: Optional[str]  = typer.Option(None, "--api-key"),
