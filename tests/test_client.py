@@ -187,10 +187,15 @@ def test_get_no_geometry_column_returns_dataset(client):
 
 @resp_lib.activate
 def test_cache_avoids_second_request(cached_client):
+    # The client negotiates Arrow first; against this JSON-only mock the first
+    # get() makes an Arrow attempt + a JSON fallback (and memoises that the
+    # mock doesn't speak Arrow). The cache contract is that the SECOND get()
+    # adds zero further HTTP calls — assert that, not an absolute count.
     resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi/data", json={"data": RECORDS})
     cached_client.get("nz_cpi")
+    calls_after_first = len(resp_lib.calls)
     cached_client.get("nz_cpi")
-    assert len(resp_lib.calls) == 1
+    assert len(resp_lib.calls) == calls_after_first  # served from cache, no new request
 
 
 # ---------------------------------------------------------------------------
