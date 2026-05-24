@@ -1,4 +1,6 @@
 import io
+from unittest.mock import MagicMock, call, patch
+
 import pandas as pd
 import pytest
 import responses as resp_lib
@@ -197,8 +199,12 @@ def test_get_no_geometry_column_returns_dataset(client):
 def test_cache_avoids_second_request(cached_client):
     # The client negotiates Arrow first; against this JSON-only mock the first
     # get() makes an Arrow attempt + a JSON fallback (and memoises that the
-    # mock doesn't speak Arrow). The cache contract is that the SECOND get()
+    # mock doesn't speak Arrow). In mode="auto", the first get() also calls
+    # info() for routing — register that endpoint too (no bulk_export_class →
+    # falls through to live). The cache contract is that the SECOND get()
     # adds zero further HTTP calls — assert that, not an absolute count.
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi",
+                 json={"name": "nz_cpi", "source": "Stats NZ"})  # no bulk_export_class → live
     resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi/data", json={"data": RECORDS})
     cached_client.get("nz_cpi")
     calls_after_first = len(resp_lib.calls)
@@ -508,3 +514,236 @@ def test_download_bulk_invalid_freshness_raises_value_error(client):
     """An unrecognised freshness string should raise ValueError before any HTTP call."""
     with pytest.raises(ValueError, match="Unknown freshness"):
         client.download_bulk("nz_cpi", freshness="latest")
+
+
+# ---------------------------------------------------------------------------
+# get() smart-routing — mode="auto" / "live" / "cached"
+# ---------------------------------------------------------------------------
+
+# Metadata shapes used across the routing tests.
+_META_SMALL_TABULAR = {
+    "name": "nz_cpi", "source": "Stats NZ", "namespace": "statsnz",
+    "bulk_export_class": "cc_by",
+    "row_count_at_last_refresh": 145,   # below the 100_000 threshold
+}
+_META_LARGE_TABULAR = {
+    "name": "pharmac_schedule", "source": "PHARMAC", "namespace": "pharmac",
+    "bulk_export_class": "cc_by",
+    "row_count_at_last_refresh": 150_000,  # above threshold
+}
+_META_GEO = {
+    "name": "nz_parcels", "source": "LINZ", "namespace": "linz",
+    "bulk_export_class": "cc_by",
+    "geometry_type": "MultiPolygon",
+    "row_count_at_last_refresh": 3_000_000,
+}
+_META_LICENCE_RESTRICTED = {
+    "name": "oecd_gdp", "source": "OECD", "namespace": "oecd",
+    "bulk_export_class": "none",   # licence floor — must NOT use cache path
+    "row_count_at_last_refresh": 250_000,
+}
+
+FAKE_LOCAL_DF = pd.DataFrame({"date": ["2023-01-01"], "value": [1100.5]})
+
+
+def test_get_auto_small_tabular_routes_live(client):
+    """mode='auto' with a small, non-geo, bulk-eligible dataset must use the live path."""
+    with (
+        patch.object(client, "info", return_value=_META_SMALL_TABULAR) as mock_info,
+        patch.object(client, "_get_local_impl") as mock_local,
+        patch.object(client, "_fetch_dataframe",
+                     return_value=pd.DataFrame(RECORDS)) as mock_live,
+    ):
+        result = client.get("nz_cpi")
+
+    mock_info.assert_called_once_with("nz_cpi")
+    mock_local.assert_not_called()                      # cache path NOT taken
+    mock_live.assert_called_once()                      # live path taken
+    assert isinstance(result, Dataset)
+
+
+def test_get_auto_large_tabular_routes_cached(client):
+    """mode='auto' with >100k-row bulk-eligible dataset must use the cache+sync path."""
+    with (
+        patch.object(client, "info", return_value=_META_LARGE_TABULAR),
+        patch.object(client, "_get_local_impl", return_value=FAKE_LOCAL_DF) as mock_local,
+        patch.object(client, "_fetch_dataframe") as mock_live,
+    ):
+        result = client.get("pharmac_schedule")
+
+    mock_local.assert_called_once()
+    mock_live.assert_not_called()
+    assert isinstance(result, pd.DataFrame)
+
+
+def test_get_auto_geo_routes_cached(client):
+    """mode='auto' with a geo dataset must use the cache+sync path regardless of row count."""
+    meta_geo_small_count = {**_META_GEO, "row_count_at_last_refresh": 5_000}
+    with (
+        patch.object(client, "info", return_value=meta_geo_small_count),
+        patch.object(client, "_get_local_impl", return_value=FAKE_LOCAL_DF) as mock_local,
+        patch.object(client, "_fetch_dataframe") as mock_live,
+    ):
+        client.get("nz_parcels")
+
+    mock_local.assert_called_once()
+    mock_live.assert_not_called()
+
+
+def test_get_auto_licence_restricted_routes_live(client):
+    """Licence-restricted dataset (bulk_export_class='none') must always go live,
+    even when row_count is above the threshold.  OECD must never hit the bulk path."""
+    with (
+        patch.object(client, "info", return_value=_META_LICENCE_RESTRICTED),
+        patch.object(client, "_get_local_impl") as mock_local,
+        patch.object(client, "_fetch_dataframe",
+                     return_value=pd.DataFrame(RECORDS)) as mock_live,
+    ):
+        client.get("oecd_gdp")
+
+    mock_local.assert_not_called()   # licence floor — must not attempt bulk
+    mock_live.assert_called_once()
+
+
+def test_get_slice_limit_forces_live(client):
+    """Any slice kwarg (limit=) must bypass the metadata check entirely and go live."""
+    with (
+        patch.object(client, "info") as mock_info,
+        patch.object(client, "_get_local_impl") as mock_local,
+        patch.object(client, "_fetch_dataframe",
+                     return_value=pd.DataFrame(RECORDS)) as mock_live,
+    ):
+        client.get("nz_parcels", limit=10)
+
+    mock_info.assert_not_called()   # no metadata round-trip needed
+    mock_local.assert_not_called()
+    mock_live.assert_called_once()
+
+
+def test_get_slice_start_forces_live(client):
+    """start= kwarg must force the live path, no metadata call."""
+    with (
+        patch.object(client, "info") as mock_info,
+        patch.object(client, "_get_local_impl") as mock_local,
+        patch.object(client, "_fetch_dataframe",
+                     return_value=pd.DataFrame(RECORDS)),
+    ):
+        client.get("nz_cpi", start="2020-01-01")
+
+    mock_info.assert_not_called()
+    mock_local.assert_not_called()
+
+
+def test_get_slice_end_forces_live(client):
+    """end= kwarg must force the live path, no metadata call."""
+    with (
+        patch.object(client, "info") as mock_info,
+        patch.object(client, "_get_local_impl") as mock_local,
+        patch.object(client, "_fetch_dataframe",
+                     return_value=pd.DataFrame(RECORDS)),
+    ):
+        client.get("nz_cpi", end="2024-12-31")
+
+    mock_info.assert_not_called()
+    mock_local.assert_not_called()
+
+
+def test_get_mode_live_forces_live(client):
+    """mode='live' must bypass smart routing entirely and always use the live path."""
+    with (
+        patch.object(client, "info") as mock_info,
+        patch.object(client, "_get_local_impl") as mock_local,
+        patch.object(client, "_fetch_dataframe",
+                     return_value=pd.DataFrame(RECORDS)),
+    ):
+        client.get("nz_parcels", mode="live")
+
+    mock_info.assert_not_called()
+    mock_local.assert_not_called()
+
+
+def test_get_mode_cached_forces_cached(client):
+    """mode='cached' must bypass smart routing and always delegate to _get_local_impl."""
+    with (
+        patch.object(client, "info") as mock_info,
+        patch.object(client, "_get_local_impl", return_value=FAKE_LOCAL_DF) as mock_local,
+        patch.object(client, "_fetch_dataframe") as mock_live,
+    ):
+        result = client.get("nz_cpi", mode="cached")
+
+    mock_info.assert_not_called()
+    mock_live.assert_not_called()
+    mock_local.assert_called_once()
+    assert isinstance(result, pd.DataFrame)
+
+
+def test_get_local_alias_delegates_to_impl(client):
+    """get_local(name) must call _get_local_impl — same code path as get(name, mode='cached')."""
+    with patch.object(client, "_get_local_impl", return_value=FAKE_LOCAL_DF) as mock_impl:
+        result_via_get_local = client.get_local("nz_cpi")
+        result_via_get_cached = client.get("nz_cpi", mode="cached")
+
+    # Both calls went through _get_local_impl
+    assert mock_impl.call_count == 2
+
+
+def test_get_auto_info_exception_falls_through_to_live(client):
+    """If info() raises for any reason, mode='auto' must silently fall back to live."""
+    with (
+        patch.object(client, "info", side_effect=Exception("network error")),
+        patch.object(client, "_get_local_impl") as mock_local,
+        patch.object(client, "_fetch_dataframe",
+                     return_value=pd.DataFrame(RECORDS)) as mock_live,
+    ):
+        client.get("nz_cpi")
+
+    mock_local.assert_not_called()
+    mock_live.assert_called_once()
+
+
+def test_get_invalid_mode_raises_value_error(client):
+    """An unknown mode string must raise ValueError immediately."""
+    with pytest.raises(ValueError, match="Unknown mode"):
+        client.get("nz_cpi", mode="turbo")
+
+
+def test_get_auto_one_time_info_log(client, caplog):
+    """mode='auto' routing through cache must emit exactly one INFO log per dataset per session."""
+    import logging
+    # Reset the per-session notify set so the log fires in this test
+    import eolas_data.client as _client_module
+    _client_module._auto_route_notified.discard("nz_parcels")
+
+    with (
+        patch.object(client, "info", return_value=_META_GEO),
+        patch.object(client, "_get_local_impl", return_value=FAKE_LOCAL_DF),
+    ):
+        with caplog.at_level(logging.INFO, logger="eolas_data"):
+            client.get("nz_parcels")
+            client.get("nz_parcels")   # second call must NOT re-log
+
+    info_messages = [r for r in caplog.records
+                     if r.levelno == logging.INFO and "nz_parcels" in r.message]
+    assert len(info_messages) == 1
+    assert "cache+sync" in info_messages[0].message
+    assert "mode='live'" in info_messages[0].message
+
+
+# ---------------------------------------------------------------------------
+# Back-compat: existing test callsites (e.g. client.get("nz_cpi") with only
+# the /data endpoint mocked) must continue to return Dataset objects.
+# The auto-routing catches info() failures and falls through to live.
+# ---------------------------------------------------------------------------
+
+@resp_lib.activate
+def test_get_back_compat_small_dataset_with_only_data_endpoint_mocked(client):
+    """client.get('nz_cpi') with only /data mocked:
+    - auto-mode calls info() → ConnectionError (unmocked) → caught → meta={}
+    - bulk_ok=False → live path taken
+    - Dataset returned as before.
+    """
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi/data", json={"data": RECORDS})
+    df = client.get("nz_cpi")
+    assert isinstance(df, Dataset)
+    assert len(df) == 2
+    assert df.eolas_name == "nz_cpi"

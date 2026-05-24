@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import logging
 import os
 import pathlib
 from dataclasses import dataclass
@@ -20,6 +21,12 @@ from .exceptions import (
     NotFoundError,
     RateLimitError,
 )
+
+_log = logging.getLogger("eolas_data")
+
+# Per-session set: tracks which dataset names we have already emitted the
+# auto-routing INFO message for, so we don't spam on repeated calls.
+_auto_route_notified: set[str] = set()
 
 # Imported separately so the names module is also re-exportable for users who
 # want IDE autocomplete on dataset names without instantiating a Client.
@@ -1015,6 +1022,31 @@ class Client:
         freshness: str = "auto",
         as_geo: bool = True,
     ) -> "pd.DataFrame":
+        """Force the cache+sync path.  Equivalent to ``get(name, mode='cached')``.
+
+        This is a convenience alias for users who want to be explicit about the
+        data path.  ``client.get(name)`` with ``mode='auto'`` (the default) will
+        route through here automatically for large or geospatial datasets.
+
+        For the full parameter documentation see :meth:`_get_local_impl`.
+        """
+        return self._get_local_impl(
+            name,
+            cache_dir=cache_dir,
+            format=format,
+            freshness=freshness,
+            as_geo=as_geo,
+        )
+
+    def _get_local_impl(
+        self,
+        name: Union[str, "DatasetName"],
+        *,
+        cache_dir: Union[str, "pathlib.Path"] = "~/.cache/eolas",
+        format: Optional[str] = None,
+        freshness: str = "auto",
+        as_geo: bool = True,
+    ) -> "pd.DataFrame":
         """Download (or serve from cache) a whole dataset as a local DataFrame.
 
         This is the recommended path for large or geospatial datasets in a
@@ -1140,6 +1172,15 @@ class Client:
     # Core data fetch
     # ------------------------------------------------------------------
 
+    # Slice kwargs that, when present, force the live-API path in auto mode.
+    # These indicate the caller wants a filtered or size-capped subset that
+    # a whole-file bulk cache cannot serve.
+    _SLICE_KWARGS = frozenset({"start", "end", "limit", "dimensions"})
+
+    # Row-count threshold above which a bulk-eligible dataset is auto-routed
+    # through the cache+sync path instead of the live Iceberg scan.
+    _AUTO_ROUTE_ROW_THRESHOLD = 100_000
+
     def get(
         self,
         name: Union[str, "DatasetName"],
@@ -1149,8 +1190,24 @@ class Client:
         engine: str = "pandas",
         limit: Optional[int] = None,
         as_geo: Optional[bool] = None,
+        *,
+        mode: str = "auto",
     ) -> Dataset:
         """Fetch dataset rows as a pandas (or polars / geopandas) DataFrame.
+
+        The ``mode`` parameter controls which data path is used:
+
+        - ``"auto"`` (default): smart-routes based on dataset metadata.
+          If any slice kwarg (``start``, ``end``, ``limit``) is set the live
+          API is always used. Otherwise ``info(name)`` is called and the
+          result routed through :meth:`get_local` (cache+sync) when the
+          dataset is both bulk-eligible and large (>100k rows) or geospatial.
+          OECD and other licence-restricted datasets always fall through to
+          live regardless of size.
+        - ``"live"``: always use the live API endpoint, bypassing the cache.
+        - ``"cached"``: always use the cache+sync path (same as calling
+          :meth:`get_local`). ``start``, ``end``, ``limit``, and ``format``
+          are ignored in this mode; ``as_geo`` is forwarded.
 
         Args:
             name:   Dataset identifier, e.g. ``"nz_cpi"``. Type-checked against
@@ -1169,12 +1226,83 @@ class Client:
                     ``True`` forces the conversion (raises if geopandas missing).
                     ``False`` keeps the raw WKT string column.
                     Install with ``pip install eolas-data[geo]``.
+            mode:   ``"auto"`` (default), ``"live"``, or ``"cached"``. Controls
+                    smart-routing behaviour; see above.
 
         Returns:
             A :class:`Dataset` (pandas DataFrame subclass), a polars DataFrame
             when ``engine="polars"``, or a ``geopandas.GeoDataFrame`` when
             geometry is present and conversion is enabled.
+
+        Examples::
+
+            # Smart-routing (default) — nz_parcels auto-routes to cache+sync;
+            # nz_cpi (145 rows, no geo) stays on the live path.
+            gdf = client.get("nz_parcels")    # auto → cache path in ~seconds
+            df  = client.get("nz_cpi")        # auto → live path (small dataset)
+
+            # Force live even for large datasets
+            gdf = client.get("nz_parcels", mode="live")
+
+            # Force cache+sync explicitly (same as get_local)
+            gdf = client.get("nz_parcels", mode="cached")
+
+            # Slice queries always go live regardless of size
+            gdf = client.get("nz_parcels", limit=10)
         """
+        if mode not in ("auto", "live", "cached"):
+            raise ValueError(
+                f"Unknown mode {mode!r}. Expected 'auto', 'live', or 'cached'."
+            )
+
+        # ---- mode="cached": delegate entirely to the cache+sync path ----------
+        if mode == "cached":
+            as_geo_for_local = True if as_geo is None else bool(as_geo)
+            return self._get_local_impl(name, as_geo=as_geo_for_local)
+
+        # ---- early in-memory cache check (before routing / network calls) -----
+        # The cache key uses the parameters that affect the live-API result.
+        # If we have a cached result, return it immediately without spending a
+        # metadata round-trip on the routing decision.
+        _early_cache_key = f"{name}:{start}:{end}:{format}:{0 if limit is None else int(limit)}:{as_geo}"
+        if self._cache is not None and _early_cache_key in self._cache:
+            return self._cache[_early_cache_key]
+
+        # ---- mode="auto": decide based on slice kwargs + dataset metadata -----
+        if mode == "auto":
+            has_slice = (start is not None) or (end is not None) or (limit is not None)
+            if not has_slice:
+                # One /v1/datasets/{name} call to read metadata.
+                try:
+                    meta = self.info(name)
+                except Exception:
+                    meta = {}
+
+                bulk_ok = (meta.get("bulk_export_class", "none") or "none") != "none"
+                is_geo = bool(
+                    meta.get("geometry_type")
+                    or meta.get("geometry_wkt")
+                    or meta.get("has_geometry")
+                )
+                row_count = meta.get("row_count_at_last_refresh") or 0
+                is_large = (row_count > self._AUTO_ROUTE_ROW_THRESHOLD)
+
+                if bulk_ok and (is_geo or is_large):
+                    # Emit a one-time per-dataset INFO so notebook users see why
+                    # a disk cache is silently appearing.
+                    name_str = str(name)
+                    if name_str not in _auto_route_notified:
+                        _auto_route_notified.add(name_str)
+                        _log.info(
+                            "auto-routing %r through cache+sync (large/geo dataset). "
+                            "Cache lives at ~/.cache/eolas/. Use mode='live' to override.",
+                            name_str,
+                        )
+                    as_geo_for_local = True if as_geo is None else bool(as_geo)
+                    return self._get_local_impl(name, as_geo=as_geo_for_local)
+                # Fall through to the live path.
+
+        # ---- live path (mode="live", or auto fell through) -------------------
         params: dict = {}
         if start:
             params["start"] = start

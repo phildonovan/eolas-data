@@ -137,33 +137,40 @@ For a columnar file (CLI), use `--format parquet --out FILE`; via the REST
 API directly, `?format=parquet`. Full benchmark: [docs.eolas.fyi → Python
 reference → Performance](https://docs.eolas.fyi/python/reference/).
 
-## Bulk downloads
+## Bulk downloads — `client.get()` is now smart
 
-For whole-dataset downloads as a single file (Parquet, gzipped CSV, or GeoParquet — no row caps), use `get_local()` — the recommended path for notebook workflows:
+`client.get()` auto-routes large or geospatial datasets through the cache+sync path — no code change needed. `client.linz("nz_parcels")` used to take 15 minutes (live Iceberg scan through the row-oriented endpoint); it now returns a GeoDataFrame in seconds.
 
 ```python
-# First call: downloads the whole dataset from CDN into ~/.cache/eolas/
-# Subsequent calls in any future session: cheap HEAD check then local read
-gdf = client.get_local("nz_parcels")   # geopandas.GeoDataFrame (3M rows, ~1 s after first download)
-df  = client.get_local("nz_cpi")       # pd.DataFrame
+# Smart default: nz_parcels auto-routes to CDN-cached GeoParquet, no limit needed
+gdf = client.linz("nz_parcels")   # geopandas.GeoDataFrame in seconds
+df  = client.get("nz_cpi")        # small dataset → stays on live path
 
-# Custom cache dir, explicit format, skip geo conversion
-df  = client.get_local("nz_cpi", cache_dir="/data/eolas", format="csv_gz")
-gdf = client.get_local("nz_parcels", as_geo=False)   # raw WKB column, plain DataFrame
+# Escape hatches when you need explicit control:
+gdf = client.get("nz_parcels", mode="live")      # force live Iceberg scan
+gdf = client.get("nz_parcels", mode="cached")    # force cache+sync (= get_local)
 ```
 
-`get_local()` auto-detects format from metadata (geo datasets → GeoParquet, others → Parquet), expands `~`, creates the cache dir, and returns a DataFrame directly. If you have been running `client.get("nz_parcels")` and it takes 15 minutes, switch to `get_local()` — the live `/data` endpoint runs a full Iceberg scan; the bulk endpoint serves a pre-materialised file from CDN.
+**Routing rules (mode="auto", the default):**
+1. If `start=`, `end=`, or `limit=` is set → always live (slice queries can't use a whole-file cache).
+2. If the dataset is licence-restricted (`bulk_export_class="none"`, e.g. OECD) → always live.
+3. If bulk-eligible AND (has geometry OR >100k rows) → cache+sync path.
+4. Otherwise → live.
 
-For advanced control over the sync lifecycle (first-download-only, atomic replace, sidecar tracking), use `sync_bulk()` directly:
+`get_local()` is the explicit alias for `mode="cached"` — use it when you need to control `cache_dir`, `format`, or `freshness`:
 
 ```python
-r = client.sync_bulk("nz_cpi", path="nz_cpi.parquet")
+# Explicit cache+sync with extra options
+gdf = client.get_local("nz_parcels")
+gdf = client.get_local("nz_parcels", cache_dir="/data/eolas", freshness="monthly")
+df  = client.get_local("nz_cpi", format="csv_gz")
+```
+
+For advanced control over the sync lifecycle (sidecar tracking, atomic replace), use `sync_bulk()` directly. For one-shot bytes-or-path downloads, use `download_bulk()`:
+
+```python
+r    = client.sync_bulk("nz_cpi", path="nz_cpi.parquet")
 # r.status ∈ {"downloaded", "unchanged", "updated"}; r.bytes_downloaded == 0 when unchanged.
-```
-
-For one-shot downloads to bytes or a path, use `download_bulk()`:
-
-```python
 path = client.download_bulk("treasury_fiscal_spending", path="t.parquet")
 ```
 
