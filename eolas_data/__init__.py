@@ -1,7 +1,16 @@
 """eolas-data — Python client for the eolas.fyi statistical data API."""
 from .client import Client
 from .dataset import Dataset
-from .exceptions import APIError, AuthenticationError, EolasError, NotFoundError, RateLimitError
+from .exceptions import (
+    APIError,
+    AuthenticationError,
+    BulkLicenceRestricted,
+    BulkNotYetAvailable,
+    BulkUpgradeRequired,
+    EolasError,
+    NotFoundError,
+    RateLimitError,
+)
 
 __version__ = "1.0.0"
 
@@ -13,4 +22,7 @@ __all__ = [
     "RateLimitError",
     "NotFoundError",
     "APIError",
+    "BulkUpgradeRequired",
+    "BulkLicenceRestricted",
+    "BulkNotYetAvailable",
 ]

@@ -1,9 +1,17 @@
+import io
 import pandas as pd
 import pytest
 import responses as resp_lib
 
 from eolas_data import Client, Dataset
-from eolas_data.exceptions import AuthenticationError, NotFoundError, RateLimitError
+from eolas_data.exceptions import (
+    AuthenticationError,
+    BulkLicenceRestricted,
+    BulkNotYetAvailable,
+    BulkUpgradeRequired,
+    NotFoundError,
+    RateLimitError,
+)
 
 BASE = "https://api.eolas.fyi"
 
@@ -324,3 +332,179 @@ def test_integration_403_raises_authentication_error_with_server_detail(client):
     with pytest.raises(AuthenticationError) as e:
         client.integration("meltano", ["nz_cpi"])
     assert "Enterprise" in str(e.value)
+
+
+# ---------------------------------------------------------------------------
+# Client.download_bulk() — /v1/bulk/{namespace}/{table}
+# ---------------------------------------------------------------------------
+
+# Minimal Parquet bytes (just needs to be non-empty binary content for the test).
+FAKE_PARQUET = b"PAR1" + b"\x00" * 12 + b"PAR1"
+
+# Dataset metadata the client fetches first (name → namespace + table).
+BULK_DATASET_META = {
+    "name": "nz_cpi",
+    "title": "NZ Consumer Price Index",
+    "source": "Stats NZ",
+    "namespace": "statsnz",
+    "table": "nz_cpi",
+}
+
+
+def _register_bulk_happy(freshness_param: str = ""):
+    """Register the metadata lookup + the bulk 200 response.
+
+    When freshness_param is empty we simulate the bare URL → 302 → 200 path
+    (responses library follows redirects by default, so we register the
+    final 200 directly — the redirect mechanics are tested implicitly).
+    """
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi",
+                 json=BULK_DATASET_META, status=200)
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/bulk/statsnz/nz_cpi",
+                 body=FAKE_PARQUET,
+                 content_type="application/octet-stream",
+                 status=200)
+
+
+@resp_lib.activate
+def test_download_bulk_returns_bytes_when_no_path(client):
+    """With path=None download_bulk returns raw bytes."""
+    _register_bulk_happy()
+    result = client.download_bulk("nz_cpi")
+    assert isinstance(result, bytes)
+    assert result == FAKE_PARQUET
+
+
+@resp_lib.activate
+def test_download_bulk_writes_file_and_returns_path(client, tmp_path):
+    """With path=... the file is written and the resolved Path is returned."""
+    _register_bulk_happy()
+    dest = tmp_path / "nz_cpi.parquet"
+    result = client.download_bulk("nz_cpi", path=dest)
+    import pathlib
+    assert isinstance(result, pathlib.Path)
+    assert result == dest
+    assert dest.read_bytes() == FAKE_PARQUET
+
+
+@resp_lib.activate
+def test_download_bulk_creates_parent_dirs(client, tmp_path):
+    """Parent directories are created automatically when path has them."""
+    _register_bulk_happy()
+    dest = tmp_path / "nested" / "dir" / "nz_cpi.parquet"
+    result = client.download_bulk("nz_cpi", path=dest)
+    assert result.exists()
+
+
+@resp_lib.activate
+def test_download_bulk_sends_format_param(client):
+    """The format query param is sent to the bulk endpoint."""
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi",
+                 json=BULK_DATASET_META, status=200)
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/bulk/statsnz/nz_cpi",
+                 body=b"csv data",
+                 content_type="application/octet-stream",
+                 status=200)
+    client.download_bulk("nz_cpi", format="csv_gz")
+    bulk_req = resp_lib.calls[1].request
+    assert "format=csv_gz" in bulk_req.url
+
+
+@resp_lib.activate
+def test_download_bulk_auto_freshness_omits_param(client):
+    """freshness='auto' must NOT send a freshness= query param (server-redirect logic)."""
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi",
+                 json=BULK_DATASET_META, status=200)
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/bulk/statsnz/nz_cpi",
+                 body=FAKE_PARQUET,
+                 content_type="application/octet-stream",
+                 status=200)
+    client.download_bulk("nz_cpi", freshness="auto")
+    bulk_req = resp_lib.calls[1].request
+    assert "freshness" not in bulk_req.url
+
+
+@resp_lib.activate
+def test_download_bulk_monthly_freshness_sends_param(client):
+    """freshness='monthly' must include freshness=monthly in the request URL."""
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi",
+                 json=BULK_DATASET_META, status=200)
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/bulk/statsnz/nz_cpi",
+                 body=FAKE_PARQUET,
+                 content_type="application/octet-stream",
+                 status=200)
+    client.download_bulk("nz_cpi", freshness="monthly")
+    bulk_req = resp_lib.calls[1].request
+    assert "freshness=monthly" in bulk_req.url
+
+
+@resp_lib.activate
+def test_download_bulk_402_raises_bulk_upgrade_required(client):
+    """HTTP 402 from the bulk endpoint → BulkUpgradeRequired."""
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi",
+                 json=BULK_DATASET_META, status=200)
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/bulk/statsnz/nz_cpi",
+                 json={"detail": "Fresh bulk downloads are a Pro feature."},
+                 status=402)
+    with pytest.raises(BulkUpgradeRequired) as exc_info:
+        client.download_bulk("nz_cpi", freshness="current")
+    assert "Pro" in str(exc_info.value)
+
+
+@resp_lib.activate
+def test_download_bulk_403_licence_raises_bulk_licence_restricted(client):
+    """HTTP 403 with 'licence' in detail → BulkLicenceRestricted (not AuthenticationError)."""
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/oecd_gdp",
+                 json={**BULK_DATASET_META, "name": "oecd_gdp",
+                       "namespace": "oecd", "table": "oecd_gdp"},
+                 status=200)
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/bulk/oecd/oecd_gdp",
+                 json={"detail": "This dataset is not available as a bulk download (licence: OECD)."},
+                 status=403)
+    with pytest.raises(BulkLicenceRestricted):
+        client.download_bulk("oecd_gdp")
+
+
+@resp_lib.activate
+def test_download_bulk_403_auth_raises_authentication_error(client):
+    """HTTP 403 without 'licence' in detail → standard AuthenticationError."""
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi",
+                 json=BULK_DATASET_META, status=200)
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/bulk/statsnz/nz_cpi",
+                 json={"detail": "API key is inactive."},
+                 status=403)
+    with pytest.raises(AuthenticationError):
+        client.download_bulk("nz_cpi")
+
+
+@resp_lib.activate
+def test_download_bulk_503_raises_bulk_not_yet_available(client):
+    """HTTP 503 from the bulk endpoint → BulkNotYetAvailable."""
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi",
+                 json=BULK_DATASET_META, status=200)
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/bulk/statsnz/nz_cpi",
+                 json={"detail": "Monthly bulk snapshots are still rolling out."},
+                 status=503)
+    with pytest.raises(BulkNotYetAvailable):
+        client.download_bulk("nz_cpi")
+
+
+@resp_lib.activate
+def test_download_bulk_404_raises_not_found(client):
+    """HTTP 404 from the metadata lookup → NotFoundError."""
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/bad_name",
+                 json={"detail": "Not found."}, status=404)
+    with pytest.raises(NotFoundError):
+        client.download_bulk("bad_name")
+
+
+def test_download_bulk_invalid_format_raises_value_error(client):
+    """An unrecognised format string should raise ValueError before any HTTP call."""
+    with pytest.raises(ValueError, match="Unknown format"):
+        client.download_bulk("nz_cpi", format="xlsx")
+
+
+def test_download_bulk_invalid_freshness_raises_value_error(client):
+    """An unrecognised freshness string should raise ValueError before any HTTP call."""
+    with pytest.raises(ValueError, match="Unknown freshness"):
+        client.download_bulk("nz_cpi", freshness="latest")

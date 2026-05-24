@@ -1,13 +1,22 @@
 from __future__ import annotations
 
 import os
+import pathlib
 from typing import Optional, Union
 
 import pandas as pd
 import requests
 
 from .dataset import Dataset
-from .exceptions import APIError, AuthenticationError, NotFoundError, RateLimitError
+from .exceptions import (
+    APIError,
+    AuthenticationError,
+    BulkLicenceRestricted,
+    BulkNotYetAvailable,
+    BulkUpgradeRequired,
+    NotFoundError,
+    RateLimitError,
+)
 
 # Imported separately so the names module is also re-exportable for users who
 # want IDE autocomplete on dataset names without instantiating a Client.
@@ -155,6 +164,162 @@ class Client:
             params={"datasets": ",".join(datasets)},
         )
         return resp.get("files", {})
+
+    # ------------------------------------------------------------------
+    # Bulk download
+    # ------------------------------------------------------------------
+
+    _BULK_EXTENSIONS = {
+        "parquet":    ".parquet",
+        "csv_gz":     ".csv.gz",
+        "geoparquet": ".geo.parquet",
+    }
+
+    def download_bulk(
+        self,
+        name: Union[str, "DatasetName"],
+        *,
+        freshness: str = "auto",
+        format: str = "parquet",
+        path: Optional[Union[str, "pathlib.Path"]] = None,
+    ) -> "Union[pathlib.Path, bytes]":
+        """Download a complete dataset as a single binary file.
+
+        Wraps ``GET /v1/bulk/{namespace}/{table}`` which streams a Parquet,
+        gzipped-CSV, or GeoParquet snapshot. Monthly snapshots are served from
+        Cloudflare's edge cache and are typically delivered in milliseconds.
+        Current snapshots are lazy-generated for Pro users on first request.
+
+        The endpoint requires both ``namespace`` and ``table``. These are
+        resolved automatically by first calling ``GET /v1/datasets/{name}`` and
+        reading ``namespace`` and ``table`` off the metadata response.
+
+        Args:
+            name: Dataset identifier, e.g. ``"nz_cpi"``.
+            freshness: ``"auto"`` (default) — omit the query param so the
+                server picks the right level for your plan (Free → monthly,
+                Pro → current). ``"monthly"`` or ``"current"`` override
+                explicitly.
+            format: ``"parquet"`` (default), ``"csv_gz"``, or ``"geoparquet"``.
+                GeoParquet is only available on geospatial datasets.
+            path: Where to write the file. ``None`` (default) returns the raw
+                bytes. Pass a ``str`` or ``pathlib.Path`` to write to disk and
+                return the resolved path. Parent directories are created if
+                needed.
+
+        Returns:
+            ``pathlib.Path`` when ``path`` is set (the resolved, written path).
+            ``bytes`` when ``path`` is ``None``.
+
+        Raises:
+            BulkUpgradeRequired: HTTP 402 — ``freshness="current"`` requires Pro.
+            BulkLicenceRestricted: HTTP 403 with a licence body — dataset is
+                excluded from bulk (e.g. OECD). Use ``client.get()`` instead.
+            BulkNotYetAvailable: HTTP 503 — monthly snapshot not yet generated.
+            NotFoundError: Dataset or namespace/table not found.
+            AuthenticationError: Invalid or missing API key.
+
+        Examples::
+
+            # Return bytes (e.g. hand to pd.read_parquet)
+            import io, pandas as pd
+            raw = client.download_bulk("nz_cpi")
+            df = pd.read_parquet(io.BytesIO(raw))
+
+            # Write to a file, get the path back
+            p = client.download_bulk("nz_cpi", path="nz_cpi.parquet")
+            df = pd.read_parquet(p)
+
+            # Gzipped CSV for spreadsheet users
+            client.download_bulk("nz_cpi", format="csv_gz", path="nz_cpi.csv.gz")
+
+            # Force monthly freshness (works on any plan — useful for reproducibility)
+            client.download_bulk("nz_cpi", freshness="monthly", path="nz_cpi.parquet")
+
+        See Also:
+            https://docs.eolas.fyi/bulk-downloads/
+        """
+        fmt = format.lower()
+        if fmt not in self._BULK_EXTENSIONS:
+            raise ValueError(
+                f"Unknown format {format!r}. Expected one of: "
+                + ", ".join(self._BULK_EXTENSIONS)
+            )
+        if freshness not in ("auto", "monthly", "current"):
+            raise ValueError(
+                f"Unknown freshness {freshness!r}. Expected 'auto', 'monthly', or 'current'."
+            )
+
+        # Resolve name → namespace + table via the datasets metadata endpoint.
+        meta = self._get(f"/v1/datasets/{name}")
+        namespace = meta.get("namespace") or ""
+        table     = meta.get("table") or meta.get("name") or name
+        if not namespace:
+            raise NotFoundError(
+                f"Dataset {name!r} metadata did not include a namespace field. "
+                "Cannot construct bulk URL."
+            )
+
+        params: dict = {"format": fmt}
+        if freshness != "auto":
+            params["freshness"] = freshness
+
+        bulk_path = f"/v1/bulk/{namespace}/{table}"
+        resp = self._raw_bulk_get(bulk_path, params=params)
+
+        data = resp.content
+        if path is None:
+            return data
+
+        out = pathlib.Path(path).expanduser().resolve()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(data)
+        return out
+
+    def _raw_bulk_get(self, path: str, params: Optional[dict] = None) -> requests.Response:
+        """Issue a GET that may 302-redirect to a canonical CDN URL.
+
+        ``requests.Session`` follows redirects by default, which is exactly
+        what we want: the bare ``/v1/bulk/{ns}/{table}`` URL redirects to the
+        canonical versioned URL, and the session fetches that transparently.
+        We only need special handling for the bulk-specific HTTP status codes
+        (402, 503) that ``_raise_for_status`` doesn't know about.
+        """
+        url  = f"{self._base}{path}"
+        resp = self._session.get(url, params=params)
+        self._raise_for_bulk_status(resp)
+        return resp
+
+    @staticmethod
+    def _raise_for_bulk_status(resp: requests.Response) -> None:
+        """Like ``_raise_for_status`` but handles the extra bulk refusal codes."""
+        if resp.status_code == 200:
+            return
+        if resp.status_code == 402:
+            try:
+                detail = resp.json().get("detail", "")
+            except Exception:
+                detail = ""
+            raise BulkUpgradeRequired(detail) if detail else BulkUpgradeRequired()
+        if resp.status_code == 403:
+            try:
+                body   = resp.json()
+                detail = body.get("detail", "")
+            except Exception:
+                detail = ""
+            # Distinguish licence-restriction 403 from auth 403 by the presence
+            # of "licence" in the server detail. A key-auth 403 goes to AuthenticationError.
+            if detail and "licence" in detail.lower():
+                raise BulkLicenceRestricted(detail)
+            raise AuthenticationError(detail or "API key is inactive.")
+        if resp.status_code == 503:
+            try:
+                detail = resp.json().get("detail", "")
+            except Exception:
+                detail = ""
+            raise BulkNotYetAvailable(detail) if detail else BulkNotYetAvailable()
+        # Delegate everything else to the standard handler.
+        Client._raise_for_status(resp)
 
     # ------------------------------------------------------------------
     # Source-specific helpers

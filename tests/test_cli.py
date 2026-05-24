@@ -481,3 +481,133 @@ def test_schedule_list_json_output(monkeypatch):
     assert len(lines) == 2
     parsed = [json.loads(l) for l in lines]
     assert {p["name"] for p in parsed} == {"foo", "bar"}
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# download
+# ────────────────────────────────────────────────────────────────────────────
+
+BULK_DATASET_META = {
+    "name": "nz_cpi",
+    "title": "NZ CPI",
+    "source": "Stats NZ",
+    "namespace": "statsnz",
+    "table": "nz_cpi",
+}
+
+FAKE_PARQUET = b"PAR1" + b"\x00" * 12 + b"PAR1"
+
+
+def test_download_help_renders():
+    """The download subcommand must appear in --help output."""
+    result = runner.invoke(app, ["download", "--help"])
+    assert result.exit_code == 0
+    assert "download" in result.stdout.lower()
+    assert "parquet" in result.stdout.lower()
+
+
+@resp_lib.activate
+def test_download_writes_parquet_to_default_path(tmp_path, monkeypatch):
+    """Without --out, the file lands in cwd as <name>.parquet."""
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi",
+                 json=BULK_DATASET_META, status=200)
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/bulk/statsnz/nz_cpi",
+                 body=FAKE_PARQUET,
+                 content_type="application/octet-stream",
+                 status=200)
+    # Patch cwd so the default --out resolves inside tmp_path.
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["download", "nz_cpi", "--api-key", "k"])
+    assert result.exit_code == 0
+    assert (tmp_path / "nz_cpi.parquet").read_bytes() == FAKE_PARQUET
+
+
+@resp_lib.activate
+def test_download_explicit_out_path(tmp_path):
+    """--out FILE writes to the specified path."""
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi",
+                 json=BULK_DATASET_META, status=200)
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/bulk/statsnz/nz_cpi",
+                 body=FAKE_PARQUET,
+                 content_type="application/octet-stream",
+                 status=200)
+    dest = tmp_path / "output.parquet"
+    result = runner.invoke(app, ["download", "nz_cpi",
+                                 "--out", str(dest), "--api-key", "k"])
+    assert result.exit_code == 0
+    assert dest.read_bytes() == FAKE_PARQUET
+
+
+@resp_lib.activate
+def test_download_csv_format(tmp_path, monkeypatch):
+    """--format csv sends format=csv_gz to the server and writes a .csv.gz file."""
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi",
+                 json=BULK_DATASET_META, status=200)
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/bulk/statsnz/nz_cpi",
+                 body=b"fake gz content",
+                 content_type="application/octet-stream",
+                 status=200)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["download", "nz_cpi",
+                                 "--format", "csv", "--api-key", "k"])
+    assert result.exit_code == 0
+    assert (tmp_path / "nz_cpi.csv.gz").exists()
+    bulk_req = resp_lib.calls[1].request
+    assert "format=csv_gz" in bulk_req.url
+
+
+@resp_lib.activate
+def test_download_402_exits_auth_code(tmp_path, monkeypatch):
+    """HTTP 402 should exit with EXIT_AUTH and mention pricing."""
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi",
+                 json=BULK_DATASET_META, status=200)
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/bulk/statsnz/nz_cpi",
+                 json={"detail": "Fresh bulk downloads are a Pro feature. Free accounts get the latest monthly snapshot — see https://eolas.fyi/pricing."},
+                 status=402)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["download", "nz_cpi",
+                                 "--freshness", "current", "--api-key", "k"])
+    assert result.exit_code == cli_module.EXIT_AUTH
+    assert "pricing" in result.stderr.lower() or "pricing" in result.stdout.lower()
+
+
+@resp_lib.activate
+def test_download_403_licence_exits_auth_code(tmp_path, monkeypatch):
+    """HTTP 403 licence restriction should exit with EXIT_AUTH."""
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/oecd_gdp",
+                 json={**BULK_DATASET_META, "name": "oecd_gdp",
+                       "namespace": "oecd", "table": "oecd_gdp"},
+                 status=200)
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/bulk/oecd/oecd_gdp",
+                 json={"detail": "This dataset is not available as a bulk download (licence: OECD)."},
+                 status=403)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["download", "oecd_gdp", "--api-key", "k"])
+    assert result.exit_code == cli_module.EXIT_AUTH
+
+
+@resp_lib.activate
+def test_download_503_exits_api_code(tmp_path, monkeypatch):
+    """HTTP 503 (snapshot not ready) should exit with EXIT_API."""
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi",
+                 json=BULK_DATASET_META, status=200)
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/bulk/statsnz/nz_cpi",
+                 json={"detail": "Monthly bulk snapshots are still rolling out."},
+                 status=503)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["download", "nz_cpi", "--api-key", "k"])
+    assert result.exit_code == cli_module.EXIT_API
+
+
+def test_download_unknown_format_exits_usage():
+    """Unknown --format should exit with EXIT_USAGE before making any HTTP call."""
+    result = runner.invoke(app, ["download", "nz_cpi",
+                                 "--format", "xlsx", "--api-key", "k"])
+    assert result.exit_code == cli_module.EXIT_USAGE
+
+
+def test_download_unknown_freshness_exits_usage():
+    """Unknown --freshness should exit with EXIT_USAGE before making any HTTP call."""
+    result = runner.invoke(app, ["download", "nz_cpi",
+                                 "--freshness", "yesterday", "--api-key", "k"])
+    assert result.exit_code == cli_module.EXIT_USAGE

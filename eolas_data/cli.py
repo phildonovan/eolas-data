@@ -28,6 +28,9 @@ from .client import Client
 from .exceptions import (
     APIError,
     AuthenticationError,
+    BulkLicenceRestricted,
+    BulkNotYetAvailable,
+    BulkUpgradeRequired,
     EolasError,
     NotFoundError,
     RateLimitError,
@@ -293,6 +296,132 @@ def get_cmd(
             sys.stdout.write("\n")
     elif fmt == "parquet":
         df.to_parquet(out, index=False)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# download command — bulk single-file downloads via /v1/bulk/{namespace}/{table}
+# ────────────────────────────────────────────────────────────────────────────
+
+# Map CLI --format aliases to the values the server (and client.download_bulk) accept.
+_DOWNLOAD_FORMAT_MAP = {
+    "parquet":    "parquet",
+    "csv":        "csv_gz",
+    "csv_gz":     "csv_gz",
+    "geoparquet": "geoparquet",
+}
+
+# Default output-file extensions for each format (used when --out is not set).
+_DOWNLOAD_EXT = {
+    "parquet":    ".parquet",
+    "csv_gz":     ".csv.gz",
+    "geoparquet": ".geo.parquet",
+}
+
+
+@app.command(name="download")
+def download_cmd(
+    name:      str,
+    fmt:       str           = typer.Option(
+        "parquet", "--format", "-f",
+        help="Output format: parquet (default) | csv | geoparquet.",
+    ),
+    freshness: str           = typer.Option(
+        "auto", "--freshness",
+        help=(
+            "auto (default — server picks based on plan: Free→monthly, Pro→current) | "
+            "monthly | current"
+        ),
+    ),
+    out:       Optional[Path] = typer.Option(
+        None, "--out", "-o",
+        help=(
+            "Where to write the file. Defaults to <name>.<ext> in the current directory. "
+            "Binary output — cannot stream to stdout."
+        ),
+    ),
+    api_key:   Optional[str]  = typer.Option(None, "--api-key"),
+) -> None:
+    """Download a complete dataset as a single file (Parquet, CSV.gz, or GeoParquet).
+
+    Uses the /v1/bulk/{namespace}/{table} endpoint. Monthly snapshots for Free
+    accounts are served from Cloudflare's edge cache. Pro accounts get the
+    current Iceberg snapshot on demand.
+
+    Examples
+    --------
+        eolas download nz_cpi
+        eolas download nz_cpi --format csv --out cpi.csv.gz
+        eolas download nz_cpi --freshness monthly
+        eolas download territorial_authority_2023 --format geoparquet
+    """
+    fmt_lower = fmt.lower()
+    if fmt_lower not in _DOWNLOAD_FORMAT_MAP:
+        _bail(
+            f"unknown --format {fmt!r}; expected parquet, csv, or geoparquet",
+            EXIT_USAGE,
+        )
+    if freshness not in ("auto", "monthly", "current"):
+        _bail(
+            f"unknown --freshness {freshness!r}; expected auto, monthly, or current",
+            EXIT_USAGE,
+        )
+
+    server_fmt = _DOWNLOAD_FORMAT_MAP[fmt_lower]
+    if out is None:
+        ext = _DOWNLOAD_EXT[server_fmt]
+        out = Path.cwd() / f"{name}{ext}"
+    else:
+        out = out.expanduser().resolve()
+
+    try:
+        result_path = _client(api_key).download_bulk(
+            name,
+            freshness=freshness,
+            format=server_fmt,
+            path=out,
+        )
+    except BulkUpgradeRequired as e:
+        err_console.print(f"[red]error:[/red] {e}")
+        err_console.print("[dim]→ https://eolas.fyi/pricing[/dim]")
+        raise typer.Exit(code=EXIT_AUTH)
+    except BulkLicenceRestricted as e:
+        err_console.print(f"[red]error:[/red] {e}")
+        err_console.print(
+            "[dim]Use `eolas get` to query this dataset via the live API instead.[/dim]"
+        )
+        raise typer.Exit(code=EXIT_AUTH)
+    except BulkNotYetAvailable as e:
+        err_console.print(f"[yellow]unavailable:[/yellow] {e}")
+        raise typer.Exit(code=EXIT_API)
+    except EolasError as e:
+        _bail(str(e), _exit_for(e))
+
+    size_bytes = result_path.stat().st_size
+    if size_bytes >= 1_048_576:
+        size_str = f"{size_bytes / 1_048_576:.1f} MB"
+    elif size_bytes >= 1_024:
+        size_str = f"{size_bytes / 1_024:.1f} KB"
+    else:
+        size_str = f"{size_bytes} B"
+
+    if sys.stdout.isatty():
+        Console().print(
+            f"[green]downloaded[/green] {result_path.name}  "
+            f"[dim]({size_str})[/dim]"
+        )
+        # Surface the snapshot version if the server sent it (only available
+        # when we can introspect the last response, which the current
+        # architecture doesn't expose — leave a placeholder for future wiring).
+    else:
+        sys.stdout.write(
+            json.dumps({
+                "path": str(result_path),
+                "bytes": size_bytes,
+                "format": server_fmt,
+                "freshness": freshness,
+            })
+        )
+        sys.stdout.write("\n")
 
 
 # ────────────────────────────────────────────────────────────────────────────
