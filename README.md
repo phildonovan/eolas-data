@@ -113,6 +113,25 @@ For a columnar file (CLI), use `--format parquet --out FILE`; via the REST
 API directly, `?format=parquet`. Full benchmark: [docs.eolas.fyi → Python
 reference → Performance](https://docs.eolas.fyi/python/reference/).
 
+## Bulk downloads
+
+For whole-dataset downloads (Parquet, gzipped CSV, or GeoParquet — no row caps), use `client.download_bulk()`:
+
+```python
+path = client.download_bulk("treasury_fiscal_spending", path="t.parquet")
+# Pro/Enterprise → current Iceberg snapshot; Free → latest monthly snapshot.
+# Licence-restricted datasets (OECD) raise BulkLicenceRestricted.
+```
+
+To keep a local file in sync with upstream refreshes without re-downloading unchanged data, use `sync_bulk()` — a cheap HEAD request checks the server's snapshot id and only transfers data if it changed:
+
+```python
+r = client.sync_bulk("nz_cpi", path="nz_cpi.parquet")
+# r.status ∈ {"downloaded", "unchanged", "updated"}; r.bytes_downloaded == 0 when unchanged.
+```
+
+CLI mirror: `eolas download <name>` for one-shot, `eolas sync <name> [--watch hourly]` for an incremental check (foreground loop, Ctrl-C exits). Full docs: [docs.eolas.fyi/bulk-downloads/](https://docs.eolas.fyi/bulk-downloads/).
+
 ## Geospatial
 
 Datasets with a `geometry_wkt` column auto-convert to `geopandas.GeoDataFrame` if `geopandas` is installed:
