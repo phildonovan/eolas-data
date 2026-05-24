@@ -542,6 +542,17 @@ _META_LICENCE_RESTRICTED = {
     "bulk_export_class": "none",   # licence floor — must NOT use cache path
     "row_count_at_last_refresh": 250_000,
 }
+# Server now returns geometry_type="none" (string) for non-geo datasets after
+# the metadata-enrichment landing in commit 3e192e5. This must NOT trigger
+# the geo path — "none" is semantically falsy for routing purposes.
+_META_NON_GEO_WITH_NONE_STRING = {
+    "name": "rbnz_b2_wholesale_rates_monthly",
+    "source": "RBNZ", "namespace": "rbnz",
+    "bulk_export_class": "on_demand",
+    "geometry_type": "none",      # string "none" — must be treated as non-geo
+    "has_geometry": None,
+    "row_count_at_last_refresh": 91,   # below the 100k threshold
+}
 
 FAKE_LOCAL_DF = pd.DataFrame({"date": ["2023-01-01"], "value": [1100.5]})
 
@@ -685,6 +696,22 @@ def test_get_local_alias_delegates_to_impl(client):
 
     # Both calls went through _get_local_impl
     assert mock_impl.call_count == 2
+
+
+def test_get_auto_geometry_type_none_string_routes_live(client):
+    """geometry_type='none' (the string) returned by the enriched metadata endpoint
+    must NOT trigger the geo/cache path for a small dataset.
+    Regression test for Bug A — the non-empty string was truthy before the fix."""
+    with (
+        patch.object(client, "info", return_value=_META_NON_GEO_WITH_NONE_STRING),
+        patch.object(client, "_get_local_impl") as mock_local,
+        patch.object(client, "_fetch_dataframe",
+                     return_value=pd.DataFrame(RECORDS)) as mock_live,
+    ):
+        client.get("rbnz_b2_wholesale_rates_monthly")
+
+    mock_local.assert_not_called()   # must NOT go to cache+sync
+    mock_live.assert_called_once()   # must use the live path
 
 
 def test_get_auto_info_exception_falls_through_to_live(client):

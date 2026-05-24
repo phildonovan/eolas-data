@@ -159,6 +159,44 @@ def test_get_local_auto_format_non_geo(client, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# test_get_local_auto_format_geometry_type_none_string
+# ---------------------------------------------------------------------------
+
+def test_get_local_auto_format_geometry_type_none_string(client, tmp_path):
+    """geometry_type='none' (string) returned by the enriched metadata endpoint
+    must not trigger the geoparquet path.
+    Regression test for Bug A — the non-empty string was truthy before the fix."""
+    called_format = {}
+
+    def fake_sync_bulk(name, *, path, format, freshness, progress=None):
+        called_format["format"] = format
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+        return _make_sync_result(path, "downloaded")
+
+    with (
+        patch.object(
+            client, "info",
+            return_value={
+                "name": "rbnz_b2_wholesale_rates_monthly",
+                "namespace": "rbnz",
+                "geometry_type": "none",   # server-side enriched field
+                "has_geometry": None,
+            },
+        ),
+        patch.object(client, "sync_bulk", side_effect=fake_sync_bulk),
+        patch("pandas.read_parquet", return_value=FAKE_DF),
+    ):
+        result = client.get_local(
+            "rbnz_b2_wholesale_rates_monthly", cache_dir=str(tmp_path)
+        )
+
+    # Must pick plain parquet, NOT geoparquet
+    assert called_format["format"] == "parquet"
+    assert isinstance(result, pd.DataFrame)
+
+
+# ---------------------------------------------------------------------------
 # test_get_local_explicit_format_csv_gz
 # ---------------------------------------------------------------------------
 

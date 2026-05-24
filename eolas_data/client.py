@@ -512,9 +512,17 @@ class Client:
                 label=out.name,
                 show_progress=show,
             )
+            if bytes_dl == 0:
+                raise APIError(
+                    200,
+                    f"Bulk download for {name!r} returned an empty body "
+                    "(0 bytes). The snapshot may not exist for this dataset "
+                    "or format. Use format='parquet' for non-geo datasets.",
+                )
             os.replace(tmp, out)
         except Exception:
-            # Best-effort cleanup of the tmp file; the original is untouched.
+            # Best-effort cleanup of the tmp file; the original is NEVER touched
+            # on failure so no 0-byte file is left at the final path.
             try:
                 tmp.unlink(missing_ok=True)
             except Exception:
@@ -1268,11 +1276,11 @@ class Client:
         if format is None:
             try:
                 meta = self.info(name)
-                is_geo = bool(
-                    meta.get("geometry_type")
-                    or meta.get("geometry_wkt")
-                    or meta.get("has_geometry")
-                )
+                gt  = meta.get("geometry_type")
+                wkt = meta.get("geometry_wkt")
+                gt_truthy  = bool(gt)  and gt  != "none"
+                wkt_truthy = bool(wkt) and wkt != "none"
+                is_geo = gt_truthy or wkt_truthy or bool(meta.get("has_geometry"))
             except Exception:
                 is_geo = False
             fmt = "geoparquet" if is_geo else "parquet"
@@ -1420,11 +1428,11 @@ class Client:
                     meta = {}
 
                 bulk_ok = (meta.get("bulk_export_class", "none") or "none") != "none"
-                is_geo = bool(
-                    meta.get("geometry_type")
-                    or meta.get("geometry_wkt")
-                    or meta.get("has_geometry")
-                )
+                gt  = meta.get("geometry_type")
+                wkt = meta.get("geometry_wkt")
+                gt_truthy  = bool(gt)  and gt  != "none"
+                wkt_truthy = bool(wkt) and wkt != "none"
+                is_geo = gt_truthy or wkt_truthy or bool(meta.get("has_geometry"))
                 row_count = meta.get("row_count_at_last_refresh") or 0
                 is_large = (row_count > self._AUTO_ROUTE_ROW_THRESHOLD)
 
