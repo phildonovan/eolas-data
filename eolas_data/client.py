@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import datetime
+import json
 import os
 import pathlib
+from dataclasses import dataclass
 from typing import Optional, Union
 
 import pandas as pd
@@ -24,6 +27,31 @@ from ._dataset_names import DatasetName  # noqa: F401  (public re-export)
 
 
 BASE_URL = "https://api.eolas.fyi"
+
+_SIDECAR_SCHEMA_VERSION = 1
+
+
+@dataclass
+class SyncResult:
+    """Result of a :meth:`Client.sync_bulk` call.
+
+    Attributes:
+        status: One of ``"downloaded"`` (first time), ``"updated"``
+            (new snapshot available and written), or ``"unchanged"``
+            (local file is already current — no I/O performed).
+        previous_snapshot_id: The snapshot id recorded in the local sidecar
+            before the sync, or ``None`` when no sidecar existed.
+        current_snapshot_id: The snapshot id reported by the server's
+            ``X-Snapshot-Version`` response header.
+        path: The local file path that was written (or preserved unchanged).
+        bytes_downloaded: Bytes written in this call. ``0`` when unchanged.
+    """
+
+    status: str
+    previous_snapshot_id: Optional[str]
+    current_snapshot_id: str
+    path: pathlib.Path
+    bytes_downloaded: int
 
 
 def _to_geodataframe(df: "pd.DataFrame", force: bool = False):
@@ -275,6 +303,188 @@ class Client:
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(data)
         return out
+
+    def sync_bulk(
+        self,
+        name: Union[str, "DatasetName"],
+        *,
+        path: Union[str, "pathlib.Path"],
+        format: str = "parquet",
+        freshness: str = "auto",
+    ) -> SyncResult:
+        """Incrementally sync a bulk dataset file — only re-download when the snapshot changes.
+
+        Wraps the same ``/v1/bulk/{namespace}/{table}`` endpoint as
+        :meth:`download_bulk`, but adds a lightweight HEAD optimisation: a
+        single ~200-byte HEAD request checks the ``X-Snapshot-Version``
+        response header on the canonical redirect URL.  If the snapshot id
+        matches what's recorded in the local sidecar, the function returns
+        immediately with ``status="unchanged"`` and zero I/O on the data file.
+
+        A sidecar file ``<path>.eolas-meta.json`` is written next to the data
+        file and contains the snapshot id, download timestamp, and source URL.
+        It is used on the next call to perform the no-op check cheaply.
+
+        The replacement is **atomic**: the new file is downloaded to a
+        temporary path ``<path>.eolas-tmp-<rand>`` and then renamed over the
+        original with :func:`os.replace`.  Readers with the file open see no
+        partial bytes.
+
+        Args:
+            name: Dataset identifier, e.g. ``"nz_cpi"``.
+            path: **Required.** Where to write the data file.  The sidecar
+                lives at ``str(path) + ".eolas-meta.json"``.  Parent
+                directories are created if needed.
+            format: ``"parquet"`` (default), ``"csv_gz"``, or
+                ``"geoparquet"``.
+            freshness: ``"auto"`` (default), ``"monthly"``, or ``"current"``.
+                Passed verbatim to the bulk endpoint.
+
+        Returns:
+            A :class:`SyncResult` dataclass with ``status``,
+            ``previous_snapshot_id``, ``current_snapshot_id``, ``path``, and
+            ``bytes_downloaded``.
+
+        Raises:
+            BulkUpgradeRequired: HTTP 402.
+            BulkLicenceRestricted: HTTP 403 (licence body).
+            BulkNotYetAvailable: HTTP 503.
+            NotFoundError: Dataset not found.
+            AuthenticationError: Invalid or missing API key.
+
+        Examples::
+
+            from eolas_data import Client, SyncResult
+
+            client = Client("your_api_key")
+
+            # First call: full download
+            r = client.sync_bulk("nz_cpi", path="nz_cpi.parquet")
+            print(r.status)           # "downloaded"
+            print(r.bytes_downloaded) # e.g. 2_100_000
+
+            # Second call (same snapshot): no-op
+            r = client.sync_bulk("nz_cpi", path="nz_cpi.parquet")
+            print(r.status)           # "unchanged"
+            print(r.bytes_downloaded) # 0
+
+            # After a new ETL run: new snapshot → file replaced in-place
+            r = client.sync_bulk("nz_cpi", path="nz_cpi.parquet")
+            print(r.status)           # "updated"
+
+        See Also:
+            https://docs.eolas.fyi/bulk-downloads/
+        """
+        fmt = format.lower()
+        if fmt not in self._BULK_EXTENSIONS:
+            raise ValueError(
+                f"Unknown format {format!r}. Expected one of: "
+                + ", ".join(self._BULK_EXTENSIONS)
+            )
+        if freshness not in ("auto", "monthly", "current"):
+            raise ValueError(
+                f"Unknown freshness {freshness!r}. Expected 'auto', 'monthly', or 'current'."
+            )
+
+        out = pathlib.Path(path).expanduser().resolve()
+        sidecar = pathlib.Path(str(out) + ".eolas-meta.json")
+
+        # Read local sidecar if present.
+        prev: Optional[dict] = None
+        if sidecar.exists():
+            try:
+                prev = json.loads(sidecar.read_text())
+            except Exception:
+                prev = None
+
+        # Resolve name → namespace + table (needed to construct the bulk URL).
+        meta = self._get(f"/v1/datasets/{name}")
+        namespace = meta.get("namespace") or ""
+        table     = meta.get("table") or meta.get("name") or name
+        if not namespace:
+            raise NotFoundError(
+                f"Dataset {name!r} metadata did not include a namespace field. "
+                "Cannot construct bulk URL."
+            )
+
+        params: dict = {"format": fmt}
+        if freshness != "auto":
+            params["freshness"] = freshness
+
+        bulk_path = f"/v1/bulk/{namespace}/{table}"
+        canonical_url = f"{self._base}{bulk_path}"
+
+        # HEAD the canonical URL to read X-Snapshot-Version cheaply.
+        # We follow redirects on the HEAD so we land on the versioned CDN URL
+        # that carries the header.
+        current_sid = self._head_snapshot_version(canonical_url, params=params)
+
+        # No-op fast path: snapshot hasn't changed AND file exists on disk.
+        if (
+            prev is not None
+            and prev.get("snapshot_id") == current_sid
+            and out.exists()
+        ):
+            return SyncResult(
+                status="unchanged",
+                previous_snapshot_id=prev.get("snapshot_id"),
+                current_snapshot_id=current_sid,
+                path=out,
+                bytes_downloaded=0,
+            )
+
+        # Download (atomic replace).
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tmp = out.with_suffix(out.suffix + f".eolas-tmp-{os.urandom(4).hex()}")
+        try:
+            resp = self._raw_bulk_get(bulk_path, params=params)
+            data = resp.content
+            tmp.write_bytes(data)
+            os.replace(tmp, out)
+            bytes_dl = len(data)
+        except Exception:
+            # Best-effort cleanup of the tmp file; the original is untouched.
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise
+
+        # Write sidecar next to the data file.
+        sidecar_data = {
+            "schema_version": _SIDECAR_SCHEMA_VERSION,
+            "name": str(name),
+            "snapshot_id": current_sid,
+            "format": fmt,
+            "freshness": freshness,
+            "downloaded_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "source_url": canonical_url + "?" + "&".join(f"{k}={v}" for k, v in params.items()),
+        }
+        sidecar.write_text(json.dumps(sidecar_data, indent=2) + "\n")
+
+        return SyncResult(
+            status="downloaded" if prev is None else "updated",
+            previous_snapshot_id=prev.get("snapshot_id") if prev else None,
+            current_snapshot_id=current_sid,
+            path=out,
+            bytes_downloaded=bytes_dl,
+        )
+
+    def _head_snapshot_version(self, url: str, params: Optional[dict] = None) -> str:
+        """Issue a HEAD to ``url`` (following redirects) and return ``X-Snapshot-Version``.
+
+        The header is set by the eolas CDN/server on the canonical versioned
+        bulk URL.  If the header is absent (e.g. in tests against a stub
+        server), we fall back to an empty string, which will never match a
+        real sidecar snapshot_id, so the full GET always fires.
+
+        Raises the same bulk-refusal exceptions as :meth:`_raw_bulk_get` so
+        that the caller doesn't need to handle HEAD errors differently.
+        """
+        full_url = url if url.startswith("http") else f"{self._base}{url}"
+        resp = self._session.head(full_url, params=params, allow_redirects=True)
+        self._raise_for_bulk_status(resp)
+        return resp.headers.get("X-Snapshot-Version", "")
 
     def _raw_bulk_get(self, path: str, params: Optional[dict] = None) -> requests.Response:
         """Issue a GET that may 302-redirect to a canonical CDN URL.

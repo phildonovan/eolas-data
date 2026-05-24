@@ -22,6 +22,9 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+import signal
+import time
+
 from . import __version__
 from . import schedule as _schedule
 from .client import Client
@@ -422,6 +425,267 @@ def download_cmd(
             })
         )
         sys.stdout.write("\n")
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# sync command — incremental "is my local file still current?" check
+# ────────────────────────────────────────────────────────────────────────────
+
+# Named duration aliases for --watch.
+_WATCH_NAMED: dict[str, int] = {
+    "hourly":  3_600,
+    "daily":  86_400,
+    "weekly": 604_800,
+}
+
+# Suffix multipliers for unit-suffixed values (e.g. "30s", "5m", "1h", "1d").
+_WATCH_SUFFIXES: dict[str, int] = {
+    "s": 1,
+    "m": 60,
+    "h": 3_600,
+    "d": 86_400,
+}
+
+
+def _parse_watch_duration(raw: str) -> int:
+    """Parse a ``--watch`` duration string to an integer number of seconds.
+
+    Accepted forms:
+    - ``"60"`` or ``"60s"`` — 60 seconds
+    - ``"5m"``  — 5 minutes
+    - ``"1h"``  — 1 hour
+    - ``"1d"``  — 1 day
+    - ``"hourly"`` / ``"daily"`` / ``"weekly"`` — named aliases
+
+    Anything not recognised raises ``ValueError``.
+    """
+    s = raw.strip().lower()
+
+    # Named aliases first.
+    if s in _WATCH_NAMED:
+        return _WATCH_NAMED[s]
+
+    # Unit-suffixed form: <int><suffix>
+    if s and s[-1] in _WATCH_SUFFIXES:
+        num_str = s[:-1]
+        suffix  = s[-1]
+        try:
+            n = int(num_str)
+        except ValueError:
+            raise ValueError(
+                f"Invalid --watch duration {raw!r}: expected an integer before {suffix!r}."
+            )
+        if n <= 0:
+            raise ValueError(
+                f"Invalid --watch duration {raw!r}: value must be positive."
+            )
+        return n * _WATCH_SUFFIXES[suffix]
+
+    # Plain integer (seconds).
+    try:
+        n = int(s)
+    except ValueError:
+        raise ValueError(
+            f"Invalid --watch duration {raw!r}. "
+            "Expected a number like '60', '30s', '5m', '1h', '1d', "
+            "or a named token: hourly, daily, weekly."
+        )
+    if n <= 0:
+        raise ValueError(
+            f"Invalid --watch duration {raw!r}: value must be positive."
+        )
+    return n
+
+
+def _format_bytes(n: int) -> str:
+    """Human-readable byte count."""
+    if n >= 1_048_576:
+        return f"{n / 1_048_576:.1f} MB"
+    if n >= 1_024:
+        return f"{n / 1_024:.1f} KB"
+    return f"{n} B"
+
+
+def _sync_timestamp() -> str:
+    """Current local time in ISO-like format with timezone label."""
+    import datetime
+    now = datetime.datetime.now().astimezone()
+    # tzname() can be None on some platforms; fall back gracefully.
+    tz = now.strftime("%Z") or now.strftime("%z")
+    return now.strftime(f"%H:%M:%S {tz}")
+
+
+@app.command(name="sync")
+def sync_cmd(
+    name:      str,
+    fmt:       str            = typer.Option(
+        "parquet", "--format", "-f",
+        help="Output format: parquet (default) | csv | geoparquet.",
+    ),
+    freshness: str            = typer.Option(
+        "auto", "--freshness",
+        help=(
+            "auto (default — server picks based on plan: Free→monthly, Pro→current) | "
+            "monthly | current"
+        ),
+    ),
+    out:       Optional[Path] = typer.Option(
+        None, "--out", "-o",
+        help=(
+            "Where to write the file. Defaults to <name>.<ext> in the current directory. "
+            "A sidecar file <out>.eolas-meta.json is written alongside."
+        ),
+    ),
+    watch:     Optional[str]  = typer.Option(
+        None, "--watch",
+        help=(
+            "Run in a foreground loop. Parse a duration like '60', '30s', '5m', '1h', '1d', "
+            "or a named token: hourly, daily, weekly. "
+            "Prints one status line per iteration. Exit with Ctrl-C."
+        ),
+    ),
+    api_key:   Optional[str]  = typer.Option(None, "--api-key"),
+) -> None:
+    """Incrementally sync a bulk dataset — only re-download when the snapshot changes.
+
+    On each run, a lightweight HEAD request checks the server's X-Snapshot-Version
+    header. If the local file is already current, no data is transferred. The
+    data file is replaced atomically when an update is available, so in-flight
+    readers never see partial bytes.
+
+    A sidecar file (<out>.eolas-meta.json) records the snapshot id and is used
+    to perform the no-op check cheaply on subsequent calls.
+
+    Examples
+    --------
+        eolas sync nz_cpi
+        eolas sync nz_cpi --format csv --out ~/data/cpi.csv.gz
+        eolas sync nz_cpi --watch 1h          # poll every hour
+        eolas sync nz_cpi --watch daily        # poll once per day
+    """
+    fmt_lower = fmt.lower()
+    if fmt_lower not in _DOWNLOAD_FORMAT_MAP:
+        _bail(
+            f"unknown --format {fmt!r}; expected parquet, csv, or geoparquet",
+            EXIT_USAGE,
+        )
+    if freshness not in ("auto", "monthly", "current"):
+        _bail(
+            f"unknown --freshness {freshness!r}; expected auto, monthly, or current",
+            EXIT_USAGE,
+        )
+
+    server_fmt = _DOWNLOAD_FORMAT_MAP[fmt_lower]
+    if out is None:
+        ext = _DOWNLOAD_EXT[server_fmt]
+        out = Path.cwd() / f"{name}{ext}"
+    else:
+        out = out.expanduser().resolve()
+
+    # Parse --watch before doing any network work, so bad values fail fast.
+    interval_secs: Optional[int] = None
+    if watch is not None:
+        try:
+            interval_secs = _parse_watch_duration(watch)
+        except ValueError as e:
+            _bail(str(e), EXIT_USAGE)
+
+    client = _client(api_key)
+
+    def _run_once() -> None:
+        try:
+            result = client.sync_bulk(
+                name,
+                path=out,
+                format=server_fmt,
+                freshness=freshness,
+            )
+        except BulkUpgradeRequired as e:
+            err_console.print(f"[red]error:[/red] {e}")
+            err_console.print("[dim]→ https://eolas.fyi/pricing[/dim]")
+            raise typer.Exit(code=EXIT_AUTH)
+        except BulkLicenceRestricted as e:
+            err_console.print(f"[red]error:[/red] {e}")
+            err_console.print(
+                "[dim]Use `eolas get` to query this dataset via the live API instead.[/dim]"
+            )
+            raise typer.Exit(code=EXIT_AUTH)
+        except BulkNotYetAvailable as e:
+            err_console.print(f"[yellow]unavailable:[/yellow] {e}")
+            raise typer.Exit(code=EXIT_API)
+        except EolasError as e:
+            _bail(str(e), _exit_for(e))
+
+        if interval_secs is not None:
+            # Watch mode: one line per iteration.
+            ts = _sync_timestamp()
+            snap_short = result.current_snapshot_id[:8] if len(result.current_snapshot_id) > 8 else result.current_snapshot_id
+            if result.status == "unchanged":
+                Console().print(
+                    f"[dim][{ts}][/dim] unchanged "
+                    f"(snapshot {snap_short}…)"
+                )
+            else:
+                size_str = _format_bytes(result.bytes_downloaded)
+                verb = "downloaded" if result.status == "downloaded" else "updated to"
+                Console().print(
+                    f"[dim][{ts}][/dim] [green]{verb}[/green] snapshot "
+                    f"{snap_short}… ({size_str})"
+                )
+        elif sys.stdout.isatty():
+            # Single-run, interactive mode.
+            if result.status == "unchanged":
+                Console().print(
+                    f"[green]unchanged[/green] {out.name}  "
+                    f"[dim](snapshot {result.current_snapshot_id[:16]}…)[/dim]"
+                )
+            else:
+                size_str = _format_bytes(result.bytes_downloaded)
+                verb = "downloaded" if result.status == "downloaded" else "updated"
+                Console().print(
+                    f"[green]{verb}[/green] {out.name}  "
+                    f"[dim]({size_str})[/dim]"
+                )
+        else:
+            # Single-run, machine mode.
+            sys.stdout.write(
+                json.dumps({
+                    "status": result.status,
+                    "path": str(result.path),
+                    "bytes_downloaded": result.bytes_downloaded,
+                    "previous_snapshot_id": result.previous_snapshot_id,
+                    "current_snapshot_id": result.current_snapshot_id,
+                    "format": server_fmt,
+                    "freshness": freshness,
+                })
+            )
+            sys.stdout.write("\n")
+
+    if interval_secs is None:
+        # Single-shot mode.
+        _run_once()
+        return
+
+    # Watch loop: run, sleep, repeat. Exit cleanly on Ctrl-C (SIGINT).
+    _stop = False
+
+    def _handle_sigint(sig, frame):  # noqa: ARG001
+        nonlocal _stop
+        _stop = True
+
+    old_handler = signal.signal(signal.SIGINT, _handle_sigint)
+    try:
+        while not _stop:
+            _run_once()
+            # Sleep in small slices so Ctrl-C is noticed quickly.
+            slept = 0
+            while slept < interval_secs and not _stop:
+                time.sleep(min(1, interval_secs - slept))
+                slept += 1
+    except (typer.Exit, SystemExit):
+        raise
+    finally:
+        signal.signal(signal.SIGINT, old_handler)
 
 
 # ────────────────────────────────────────────────────────────────────────────
