@@ -188,6 +188,8 @@ r    = client.sync_bulk("nz_cpi", path="nz_cpi.parquet")
 path = client.download_bulk("treasury_fiscal_spending", path="t.parquet")
 ```
 
+**Progress bars:** `download_bulk`, `sync_bulk`, `get_local`, and the smart-routing path in `get()` all show a `tqdm` progress bar automatically in interactive terminals and VSCode notebooks, so 1+ GB files are never silent. Pass `progress=False` to suppress in scripts, or set `EOLAS_NO_PROGRESS=1` in the environment for a CI-wide escape hatch. The `--no-progress` flag does the same from the CLI.
+
 CLI mirror: `eolas download <name>` for one-shot, `eolas sync <name> [--watch hourly]` for an incremental check. Full docs: [docs.eolas.fyi/bulk-downloads/](https://docs.eolas.fyi/bulk-downloads/).
 
 ## Geospatial

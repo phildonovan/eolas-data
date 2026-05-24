@@ -203,7 +203,7 @@ def test_get_local_explicit_cache_dir_overrides_library(tmp_path, monkeypatch):
 
     synced_dirs = []
 
-    def fake_sync_bulk(name, *, path, format, freshness):
+    def fake_sync_bulk(name, *, path, format, freshness, progress=None):
         synced_dirs.append(path.parent)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.touch()

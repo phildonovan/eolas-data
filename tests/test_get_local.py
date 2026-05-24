@@ -49,7 +49,7 @@ def test_get_local_first_call_downloads_and_returns_df(client, tmp_path):
     """First call: sync_bulk downloads the file; get_local reads and returns DataFrame."""
     expected_path = tmp_path / "nz_cpi.parquet"
 
-    def fake_sync_bulk(name, *, path, format, freshness):
+    def fake_sync_bulk(name, *, path, format, freshness, progress=None):
         # create a stub file so the read doesn't fail
         path.parent.mkdir(parents=True, exist_ok=True)
         path.touch()
@@ -76,7 +76,7 @@ def test_get_local_subsequent_call_unchanged(client, tmp_path):
     """Subsequent call: sync_bulk returns unchanged; DataFrame still returned."""
     expected_path = tmp_path / "nz_cpi.parquet"
 
-    def fake_sync_bulk(name, *, path, format, freshness):
+    def fake_sync_bulk(name, *, path, format, freshness, progress=None):
         return _make_sync_result(path, "unchanged")
 
     with (
@@ -98,7 +98,7 @@ def test_get_local_auto_format_geo(client, tmp_path):
     """Dataset metadata with geometry_type -> geoparquet format, GeoDataFrame returned."""
     called_format = {}
 
-    def fake_sync_bulk(name, *, path, format, freshness):
+    def fake_sync_bulk(name, *, path, format, freshness, progress=None):
         called_format["format"] = format
         path.parent.mkdir(parents=True, exist_ok=True)
         path.touch()
@@ -138,7 +138,7 @@ def test_get_local_auto_format_non_geo(client, tmp_path):
     """No geometry in metadata -> parquet format, plain DataFrame returned."""
     called_format = {}
 
-    def fake_sync_bulk(name, *, path, format, freshness):
+    def fake_sync_bulk(name, *, path, format, freshness, progress=None):
         called_format["format"] = format
         path.parent.mkdir(parents=True, exist_ok=True)
         path.touch()
@@ -167,7 +167,7 @@ def test_get_local_explicit_format_csv_gz(client, tmp_path):
     called_format = {}
     expected_path = tmp_path / "nz_cpi.csv.gz"
 
-    def fake_sync_bulk(name, *, path, format, freshness):
+    def fake_sync_bulk(name, *, path, format, freshness, progress=None):
         called_format["format"] = format
         path.parent.mkdir(parents=True, exist_ok=True)
         path.touch()
@@ -193,7 +193,7 @@ def test_get_local_cache_dir_expands_tilde(client, tmp_path, monkeypatch):
     """cache_dir with ~ prefix expands to an absolute path (no ~ in final path)."""
     monkeypatch.setenv("HOME", str(tmp_path))
 
-    def fake_sync_bulk(name, *, path, format, freshness):
+    def fake_sync_bulk(name, *, path, format, freshness, progress=None):
         # Verify the path passed to sync_bulk has no tilde
         assert "~" not in str(path)
         assert str(path).startswith("/")

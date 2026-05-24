@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import pathlib
+import sys
 from dataclasses import dataclass
 from typing import Optional, Union
 
@@ -248,6 +249,7 @@ class Client:
         freshness: str = "auto",
         format: str = "parquet",
         path: Optional[Union[str, "pathlib.Path"]] = None,
+        progress: Optional[bool] = None,
     ) -> "Union[pathlib.Path, bytes]":
         """Download a complete dataset as a single binary file.
 
@@ -272,6 +274,14 @@ class Client:
                 bytes. Pass a ``str`` or ``pathlib.Path`` to write to disk and
                 return the resolved path. Parent directories are created if
                 needed.
+            progress: Control the download progress bar.
+                ``None`` (default) auto-detects: bar shown when
+                ``sys.stdout.isatty()`` is True (interactive terminal or
+                notebook), hidden when piped or in CI.
+                ``True`` forces the bar on regardless (useful in log-tailing
+                scenarios).  ``False`` forces it off.  When ``path`` is
+                ``None`` (bytes mode) progress is always disabled — there is
+                no file path to label.
 
         Returns:
             ``pathlib.Path`` when ``path`` is set (the resolved, written path).
@@ -302,6 +312,9 @@ class Client:
             # Force monthly freshness (works on any plan — useful for reproducibility)
             client.download_bulk("nz_cpi", freshness="monthly", path="nz_cpi.parquet")
 
+            # Silence the bar in a script even when run interactively
+            client.download_bulk("nz_cpi", path="nz_cpi.parquet", progress=False)
+
         See Also:
             https://docs.eolas.fyi/bulk-downloads/
         """
@@ -331,15 +344,24 @@ class Client:
             params["freshness"] = freshness
 
         bulk_path = f"/v1/bulk/{namespace}/{table}"
-        resp = self._raw_bulk_get(bulk_path, params=params)
 
-        data = resp.content
         if path is None:
-            return data
+            # Bytes mode: no progress bar (no file label to show).
+            resp = self._raw_bulk_get(bulk_path, params=params)
+            return resp.content
 
         out = pathlib.Path(path).expanduser().resolve()
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(data)
+
+        show = self._resolve_show_progress(progress)
+        resp = self._raw_bulk_get(bulk_path, params=params, stream=True)
+        total = int(resp.headers.get("Content-Length", 0)) or None
+        self._stream_to_file_with_progress(
+            resp, out,
+            total_bytes=total,
+            label=out.name,
+            show_progress=show,
+        )
         return out
 
     def sync_bulk(
@@ -349,6 +371,7 @@ class Client:
         path: Union[str, "pathlib.Path"],
         format: str = "parquet",
         freshness: str = "auto",
+        progress: Optional[bool] = None,
     ) -> SyncResult:
         """Incrementally sync a bulk dataset file — only re-download when the snapshot changes.
 
@@ -377,6 +400,11 @@ class Client:
                 ``"geoparquet"``.
             freshness: ``"auto"`` (default), ``"monthly"``, or ``"current"``.
                 Passed verbatim to the bulk endpoint.
+            progress: Control the download progress bar.
+                ``None`` (default) auto-detects via ``sys.stdout.isatty()``.
+                ``True`` forces the bar on; ``False`` forces it off.
+                When ``status="unchanged"`` no data is transferred so no bar
+                is shown regardless of this setting.
 
         Returns:
             A :class:`SyncResult` dataclass with ``status``,
@@ -474,12 +502,17 @@ class Client:
         # Download (atomic replace).
         out.parent.mkdir(parents=True, exist_ok=True)
         tmp = out.with_suffix(out.suffix + f".eolas-tmp-{os.urandom(4).hex()}")
+        show = self._resolve_show_progress(progress)
         try:
-            resp = self._raw_bulk_get(bulk_path, params=params)
-            data = resp.content
-            tmp.write_bytes(data)
+            resp = self._raw_bulk_get(bulk_path, params=params, stream=True)
+            total = int(resp.headers.get("Content-Length", 0)) or None
+            bytes_dl = self._stream_to_file_with_progress(
+                resp, tmp,
+                total_bytes=total,
+                label=out.name,
+                show_progress=show,
+            )
             os.replace(tmp, out)
-            bytes_dl = len(data)
         except Exception:
             # Best-effort cleanup of the tmp file; the original is untouched.
             try:
@@ -508,6 +541,82 @@ class Client:
             bytes_downloaded=bytes_dl,
         )
 
+    # ------------------------------------------------------------------
+    # Streaming helper
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_show_progress(progress: Optional[bool]) -> bool:
+        """Resolve the tri-state ``progress`` kwarg to a concrete bool.
+
+        Priority (highest first):
+        1. Explicit ``progress=True/False`` kwarg from the caller.
+        2. ``EOLAS_NO_PROGRESS=1`` environment variable — always suppresses.
+        3. ``sys.stdout.isatty()`` auto-detection.
+        """
+        if progress is not None:
+            return bool(progress)
+        if os.getenv("EOLAS_NO_PROGRESS", "").strip() in ("1", "true", "yes"):
+            return False
+        return sys.stdout.isatty()
+
+    @staticmethod
+    def _stream_to_file_with_progress(
+        resp: "requests.Response",
+        dest: "pathlib.Path",
+        *,
+        total_bytes: Optional[int],
+        label: str,
+        show_progress: bool,
+    ) -> int:
+        """Stream *resp* body to *dest*, optionally displaying a tqdm progress bar.
+
+        Parameters
+        ----------
+        resp:
+            A streaming ``requests.Response`` object (caller must have
+            passed ``stream=True`` to the ``requests.get`` / ``Session.get``
+            call).
+        dest:
+            File path to write into.  The file is opened in ``"wb"`` mode;
+            the caller is responsible for ensuring the parent directory
+            exists.
+        total_bytes:
+            Expected file size for the bar's ``total`` parameter.
+            ``None`` disables the percentage / ETA display but keeps the
+            bytes-transferred counter (tqdm handles ``total=None`` cleanly).
+        label:
+            Short description shown left of the bar (e.g. the filename).
+        show_progress:
+            ``True`` → show bar.  ``False`` → silent (tqdm ``disable=True``).
+
+        Returns
+        -------
+        int
+            Actual bytes written.
+        """
+        import tqdm.auto
+
+        bytes_written = 0
+        with tqdm.auto.tqdm(
+            total=total_bytes,
+            unit="B",
+            unit_scale=True,
+            unit_divisor=1024,
+            desc=label,
+            disable=not show_progress,
+            leave=False,
+        ) as bar:
+            with dest.open("wb") as fh:
+                # 1 MiB chunks: responsive bar updates (bar refreshes ~once per
+                # MiB) without excessive syscall overhead on large files.
+                for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        fh.write(chunk)
+                        bar.update(len(chunk))
+                        bytes_written += len(chunk)
+        return bytes_written
+
     def _head_snapshot_version(self, url: str, params: Optional[dict] = None) -> str:
         """Issue a HEAD to ``url`` (following redirects) and return ``X-Snapshot-Version``.
 
@@ -524,7 +633,12 @@ class Client:
         self._raise_for_bulk_status(resp)
         return resp.headers.get("X-Snapshot-Version", "")
 
-    def _raw_bulk_get(self, path: str, params: Optional[dict] = None) -> requests.Response:
+    def _raw_bulk_get(
+        self,
+        path: str,
+        params: Optional[dict] = None,
+        stream: bool = False,
+    ) -> requests.Response:
         """Issue a GET that may 302-redirect to a canonical CDN URL.
 
         ``requests.Session`` follows redirects by default, which is exactly
@@ -532,9 +646,12 @@ class Client:
         canonical versioned URL, and the session fetches that transparently.
         We only need special handling for the bulk-specific HTTP status codes
         (402, 503) that ``_raise_for_status`` doesn't know about.
+
+        When ``stream=True`` the response body is not eagerly downloaded —
+        callers use :meth:`_stream_to_file_with_progress` to consume it.
         """
         url  = f"{self._base}{path}"
-        resp = self._session.get(url, params=params)
+        resp = self._session.get(url, params=params, stream=stream)
         self._raise_for_bulk_status(resp)
         return resp
 
@@ -1022,6 +1139,7 @@ class Client:
         format: Optional[str] = None,
         freshness: str = "auto",
         as_geo: bool = True,
+        progress: Optional[bool] = None,
     ) -> "pd.DataFrame":
         """Force the cache+sync path.  Equivalent to ``get(name, mode='cached')``.
 
@@ -1037,6 +1155,7 @@ class Client:
             format=format,
             freshness=freshness,
             as_geo=as_geo,
+            progress=progress,
         )
 
     def _get_local_impl(
@@ -1047,6 +1166,7 @@ class Client:
         format: Optional[str] = None,
         freshness: str = "auto",
         as_geo: bool = True,
+        progress: Optional[bool] = None,
     ) -> "pd.DataFrame":
         """Download (or serve from cache) a whole dataset as a local DataFrame.
 
@@ -1083,6 +1203,9 @@ class Client:
                 ``geopandas.GeoDataFrame``.  When ``False`` (or geopandas is
                 not installed) the raw WKB binary column is returned in a plain
                 ``pd.DataFrame``.
+            progress: Control the download progress bar shown during the
+                sync phase.  Forwarded verbatim to :meth:`sync_bulk`.
+                ``None`` (default) auto-detects via ``sys.stdout.isatty()``.
 
         Returns:
             ``pd.DataFrame`` for tabular datasets.  ``geopandas.GeoDataFrame``
@@ -1161,7 +1284,7 @@ class Client:
         # Bulk exceptions (BulkLicenceRestricted, BulkUpgradeRequired,
         # BulkNotYetAvailable) propagate unchanged — their messages already
         # tell the user what to do.
-        self.sync_bulk(name, path=file_path, format=fmt, freshness=freshness)
+        self.sync_bulk(name, path=file_path, format=fmt, freshness=freshness, progress=progress)
 
         # ---- read the local file into a DataFrame ----------------------------
         if fmt == "geoparquet":

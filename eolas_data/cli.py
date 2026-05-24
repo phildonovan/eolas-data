@@ -329,26 +329,30 @@ _DOWNLOAD_EXT = {
 
 @app.command(name="download")
 def download_cmd(
-    name:      str,
-    fmt:       str           = typer.Option(
+    name:        str,
+    fmt:         str           = typer.Option(
         "parquet", "--format", "-f",
         help="Output format: parquet (default) | csv | geoparquet.",
     ),
-    freshness: str           = typer.Option(
+    freshness:   str           = typer.Option(
         "auto", "--freshness",
         help=(
             "auto (default — server picks based on plan: Free→monthly, Pro→current) | "
             "monthly | current"
         ),
     ),
-    out:       Optional[Path] = typer.Option(
+    out:         Optional[Path] = typer.Option(
         None, "--out", "-o",
         help=(
             "Where to write the file. Defaults to <name>.<ext> in the current directory. "
             "Binary output — cannot stream to stdout."
         ),
     ),
-    api_key:   Optional[str]  = typer.Option(None, "--api-key"),
+    no_progress: bool           = typer.Option(
+        False, "--no-progress",
+        help="Disable the download progress bar (useful when output is captured by a log collector).",
+    ),
+    api_key:     Optional[str]  = typer.Option(None, "--api-key"),
 ) -> None:
     """Download a complete dataset as a single file (Parquet, CSV.gz, or GeoParquet).
 
@@ -388,6 +392,7 @@ def download_cmd(
             freshness=freshness,
             format=server_fmt,
             path=out,
+            progress=False if no_progress else None,
         )
     except BulkUpgradeRequired as e:
         err_console.print(f"[red]error:[/red] {e}")
@@ -523,26 +528,26 @@ def _sync_timestamp() -> str:
 
 @app.command(name="sync")
 def sync_cmd(
-    name:      str,
-    fmt:       str            = typer.Option(
+    name:        str,
+    fmt:         str            = typer.Option(
         "parquet", "--format", "-f",
         help="Output format: parquet (default) | csv | geoparquet.",
     ),
-    freshness: str            = typer.Option(
+    freshness:   str            = typer.Option(
         "auto", "--freshness",
         help=(
             "auto (default — server picks based on plan: Free→monthly, Pro→current) | "
             "monthly | current"
         ),
     ),
-    out:       Optional[Path] = typer.Option(
+    out:         Optional[Path] = typer.Option(
         None, "--out", "-o",
         help=(
             "Where to write the file. Defaults to <name>.<ext> in the current directory. "
             "A sidecar file <out>.eolas-meta.json is written alongside."
         ),
     ),
-    watch:     Optional[str]  = typer.Option(
+    watch:       Optional[str]  = typer.Option(
         None, "--watch",
         help=(
             "Run in a foreground loop. Parse a duration like '60', '30s', '5m', '1h', '1d', "
@@ -550,7 +555,14 @@ def sync_cmd(
             "Prints one status line per iteration. Exit with Ctrl-C."
         ),
     ),
-    api_key:   Optional[str]  = typer.Option(None, "--api-key"),
+    no_progress: bool           = typer.Option(
+        False, "--no-progress",
+        help=(
+            "Disable the download progress bar. Implied by --watch (each iteration "
+            "is a scripted check; bars would spam the log)."
+        ),
+    ),
+    api_key:     Optional[str]  = typer.Option(None, "--api-key"),
 ) -> None:
     """Incrementally sync a bulk dataset — only re-download when the snapshot changes.
 
@@ -598,6 +610,14 @@ def sync_cmd(
 
     client = _client(api_key)
 
+    # In watch mode progress bars are always disabled — each iteration is a
+    # scripted background check and a fresh bar per poll would spam the log.
+    # In single-shot mode respect --no-progress; default auto-detects isatty().
+    if interval_secs is not None or no_progress:
+        _progress: Optional[bool] = False
+    else:
+        _progress = None  # auto-detect
+
     def _run_once() -> None:
         try:
             result = client.sync_bulk(
@@ -605,6 +625,7 @@ def sync_cmd(
                 path=out,
                 format=server_fmt,
                 freshness=freshness,
+                progress=_progress,
             )
         except BulkUpgradeRequired as e:
             err_console.print(f"[red]error:[/red] {e}")
