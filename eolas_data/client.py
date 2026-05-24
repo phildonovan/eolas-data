@@ -552,12 +552,20 @@ class Client:
         Priority (highest first):
         1. Explicit ``progress=True/False`` kwarg from the caller.
         2. ``EOLAS_NO_PROGRESS=1`` environment variable — always suppresses.
-        3. ``sys.stdout.isatty()`` auto-detection.
+        3. Jupyter / IPython kernel detection — Jupyter wraps stdout in an
+           ``OutStream``, so ``sys.stdout.isatty()`` returns False even when
+           the user is clearly in an interactive notebook session. If
+           ``ipykernel`` is loaded (the standard signal used by tqdm itself),
+           we're in a notebook → show the bar; ``tqdm.auto`` then renders it
+           as an ipywidget (or text bar as fallback).
+        4. ``sys.stdout.isatty()`` auto-detection for plain terminals.
         """
         if progress is not None:
             return bool(progress)
         if os.getenv("EOLAS_NO_PROGRESS", "").strip() in ("1", "true", "yes"):
             return False
+        if "ipykernel" in sys.modules:
+            return True
         return sys.stdout.isatty()
 
     @staticmethod

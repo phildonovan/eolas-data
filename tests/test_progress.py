@@ -419,3 +419,29 @@ def test_eolas_no_progress_env_suppresses_bar(client, tmp_path, monkeypatch):
         client.download_bulk("nz_cpi", path=dest)
 
     assert all(disabled_values), "EOLAS_NO_PROGRESS=1 must disable tqdm even when isatty=True"
+
+
+def test_progress_resolver_detects_jupyter():
+    """Jupyter wraps stdout so isatty() is False, but the user IS interactive
+    and tqdm.auto can render a widget. Resolver must return True when
+    'ipykernel' is loaded — this was the bug causing zero progress feedback
+    in VSCode/Jupyter notebooks."""
+    import sys
+    from unittest.mock import patch
+    from eolas_data.client import Client
+
+    # Simulate Jupyter: ipykernel imported + stdout NOT a TTY
+    with patch.dict(sys.modules, {"ipykernel": __import__("os")}), \
+         patch("sys.stdout.isatty", return_value=False):
+        assert Client._resolve_show_progress(None) is True, \
+            "ipykernel-loaded session must show progress regardless of isatty"
+
+    # Sanity: explicit progress=False still wins
+    with patch.dict(sys.modules, {"ipykernel": __import__("os")}):
+        assert Client._resolve_show_progress(False) is False
+
+    # Sanity: EOLAS_NO_PROGRESS still wins
+    import os
+    with patch.dict(sys.modules, {"ipykernel": __import__("os")}), \
+         patch.dict(os.environ, {"EOLAS_NO_PROGRESS": "1"}):
+        assert Client._resolve_show_progress(None) is False
