@@ -139,22 +139,35 @@ reference → Performance](https://docs.eolas.fyi/python/reference/).
 
 ## Bulk downloads
 
-For whole-dataset downloads (Parquet, gzipped CSV, or GeoParquet — no row caps), use `client.download_bulk()`:
+For whole-dataset downloads as a single file (Parquet, gzipped CSV, or GeoParquet — no row caps), use `get_local()` — the recommended path for notebook workflows:
 
 ```python
-path = client.download_bulk("treasury_fiscal_spending", path="t.parquet")
-# Pro/Enterprise → current Iceberg snapshot; Free → latest monthly snapshot.
-# Licence-restricted datasets (OECD) raise BulkLicenceRestricted.
+# First call: downloads the whole dataset from CDN into ~/.cache/eolas/
+# Subsequent calls in any future session: cheap HEAD check then local read
+gdf = client.get_local("nz_parcels")   # geopandas.GeoDataFrame (3M rows, ~1 s after first download)
+df  = client.get_local("nz_cpi")       # pd.DataFrame
+
+# Custom cache dir, explicit format, skip geo conversion
+df  = client.get_local("nz_cpi", cache_dir="/data/eolas", format="csv_gz")
+gdf = client.get_local("nz_parcels", as_geo=False)   # raw WKB column, plain DataFrame
 ```
 
-To keep a local file in sync with upstream refreshes without re-downloading unchanged data, use `sync_bulk()` — a cheap HEAD request checks the server's snapshot id and only transfers data if it changed:
+`get_local()` auto-detects format from metadata (geo datasets → GeoParquet, others → Parquet), expands `~`, creates the cache dir, and returns a DataFrame directly. If you have been running `client.get("nz_parcels")` and it takes 15 minutes, switch to `get_local()` — the live `/data` endpoint runs a full Iceberg scan; the bulk endpoint serves a pre-materialised file from CDN.
+
+For advanced control over the sync lifecycle (first-download-only, atomic replace, sidecar tracking), use `sync_bulk()` directly:
 
 ```python
 r = client.sync_bulk("nz_cpi", path="nz_cpi.parquet")
 # r.status ∈ {"downloaded", "unchanged", "updated"}; r.bytes_downloaded == 0 when unchanged.
 ```
 
-CLI mirror: `eolas download <name>` for one-shot, `eolas sync <name> [--watch hourly]` for an incremental check (foreground loop, Ctrl-C exits). Full docs: [docs.eolas.fyi/bulk-downloads/](https://docs.eolas.fyi/bulk-downloads/).
+For one-shot downloads to bytes or a path, use `download_bulk()`:
+
+```python
+path = client.download_bulk("treasury_fiscal_spending", path="t.parquet")
+```
+
+CLI mirror: `eolas download <name>` for one-shot, `eolas sync <name> [--watch hourly]` for an incremental check. Full docs: [docs.eolas.fyi/bulk-downloads/](https://docs.eolas.fyi/bulk-downloads/).
 
 ## Geospatial
 

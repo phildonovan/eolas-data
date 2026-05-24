@@ -1001,6 +1001,142 @@ class Client:
         return df
 
     # ------------------------------------------------------------------
+    # Local-file convenience
+    # ------------------------------------------------------------------
+
+    _DEFAULT_CACHE_DIR = pathlib.Path.home() / ".cache" / "eolas"
+
+    def get_local(
+        self,
+        name: Union[str, "DatasetName"],
+        *,
+        cache_dir: Union[str, "pathlib.Path"] = "~/.cache/eolas",
+        format: Optional[str] = None,
+        freshness: str = "auto",
+        as_geo: bool = True,
+    ) -> "pd.DataFrame":
+        """Download (or serve from cache) a whole dataset as a local DataFrame.
+
+        This is the recommended path for large or geospatial datasets in a
+        notebook workflow.  On the first call it fetches the bulk file from
+        CDN (milliseconds for monthly snapshots) and writes it to
+        ``~/.cache/eolas/``.  On subsequent calls in the same or future
+        sessions a lightweight HEAD request checks whether the file is still
+        current; if so the local copy is read directly with zero network I/O
+        on the data payload.
+
+        If you have been calling ``client.get("nz_parcels")`` on a 3-million-
+        row geospatial dataset and it takes 15+ minutes, use ``get_local``
+        instead — it serves a pre-materialised GeoParquet from CDN, not a live
+        Iceberg scan through the row-oriented data endpoint.
+
+        Args:
+            name: Dataset identifier, e.g. ``"nz_parcels"``.
+            cache_dir: Local directory for cached files.  Accepts ``~``-prefixed
+                strings, ``str``, or ``pathlib.Path``.  The directory is
+                created if it does not exist.  Defaults to ``~/.cache/eolas/``.
+            format: ``"parquet"``, ``"csv_gz"``, or ``"geoparquet"``.  ``None``
+                (default) auto-detects: calls ``self.info(name)`` and checks
+                whether the dataset metadata indicates geometry; geo datasets
+                use ``"geoparquet"``, everything else uses ``"parquet"``.
+            freshness: ``"auto"`` (default), ``"monthly"``, or ``"current"``.
+                Passed verbatim to :meth:`sync_bulk`.
+            as_geo: When ``True`` (default) and the file is GeoParquet and
+                ``geopandas`` is installed, the returned object is a
+                ``geopandas.GeoDataFrame``.  When ``False`` (or geopandas is
+                not installed) the raw WKB binary column is returned in a plain
+                ``pd.DataFrame``.
+
+        Returns:
+            ``pd.DataFrame`` for tabular datasets.  ``geopandas.GeoDataFrame``
+            for geospatial datasets when ``as_geo=True`` and geopandas is
+            installed.
+
+        Raises:
+            BulkUpgradeRequired: Passes through from :meth:`sync_bulk` — the
+                dataset requires a Pro plan for the requested freshness.
+            BulkLicenceRestricted: Passes through — this dataset cannot be
+                bulk-downloaded (e.g. OECD).  Use ``client.get(name)`` instead.
+            BulkNotYetAvailable: Passes through — the monthly snapshot has not
+                been generated yet.
+            NotFoundError: Dataset not found.
+            AuthenticationError: Invalid or missing API key.
+
+        Examples::
+
+            from eolas_data import Client
+            client = Client("your_api_key")
+
+            # 3-million-row geospatial dataset — first call downloads ~1 GB
+            # GeoParquet from CDN; subsequent calls return in <1 s.
+            gdf = client.get_local("nz_parcels")
+
+            # Non-geo dataset
+            df = client.get_local("nz_cpi")
+
+            # Custom cache dir
+            df = client.get_local("nz_cpi", cache_dir="/tmp/eolas-cache")
+
+            # Force CSV format
+            df = client.get_local("nz_cpi", format="csv_gz")
+
+            # Keep raw WKB column instead of converting to GeoDataFrame
+            df = client.get_local("nz_parcels", as_geo=False)
+
+        See Also:
+            :meth:`sync_bulk` — for advanced control over the sync lifecycle.
+            https://docs.eolas.fyi/bulk-downloads/
+        """
+        # ---- resolve cache_dir -----------------------------------------------
+        cache_path = pathlib.Path(cache_dir).expanduser().resolve()
+        cache_path.mkdir(parents=True, exist_ok=True)
+
+        # ---- auto-detect format if not specified -----------------------------
+        if format is None:
+            try:
+                meta = self.info(name)
+                is_geo = bool(
+                    meta.get("geometry_type")
+                    or meta.get("geometry_wkt")
+                    or meta.get("has_geometry")
+                )
+            except Exception:
+                is_geo = False
+            fmt = "geoparquet" if is_geo else "parquet"
+        else:
+            fmt = format.lower()
+            if fmt not in self._BULK_EXTENSIONS:
+                raise ValueError(
+                    f"Unknown format {format!r}. Expected one of: "
+                    + ", ".join(self._BULK_EXTENSIONS)
+                )
+
+        # ---- compute local file path -----------------------------------------
+        ext = self._BULK_EXTENSIONS[fmt]  # e.g. ".parquet", ".csv.gz", ".geo.parquet"
+        file_path = cache_path / f"{name}{ext}"
+
+        # ---- sync (download if needed, HEAD check if cached) -----------------
+        # Bulk exceptions (BulkLicenceRestricted, BulkUpgradeRequired,
+        # BulkNotYetAvailable) propagate unchanged — their messages already
+        # tell the user what to do.
+        self.sync_bulk(name, path=file_path, format=fmt, freshness=freshness)
+
+        # ---- read the local file into a DataFrame ----------------------------
+        if fmt == "geoparquet":
+            if as_geo:
+                try:
+                    import geopandas as gpd
+                    return gpd.read_parquet(file_path)
+                except ImportError:
+                    pass
+            # geopandas not installed or as_geo=False — read as plain parquet
+            return pd.read_parquet(file_path)
+        elif fmt == "csv_gz":
+            return pd.read_csv(file_path)  # pandas handles .gz automatically
+        else:  # parquet
+            return pd.read_parquet(file_path)
+
+    # ------------------------------------------------------------------
     # Core data fetch
     # ------------------------------------------------------------------
 
