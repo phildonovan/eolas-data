@@ -28,6 +28,7 @@ import time
 from . import __version__
 from . import schedule as _schedule
 from .client import Client, _KEYRING_SERVICE, _KEYRING_USERNAME, _keyring_get
+from .library import library_clear, library_set, library_status
 from .exceptions import (
     APIError,
     AuthenticationError,
@@ -66,10 +67,12 @@ datasets_app  = typer.Typer(help="Browse and inspect datasets.", no_args_is_help
 auth_app      = typer.Typer(help="Manage your API key (env var, OS keyring, or ~/.eolas/config.json).", no_args_is_help=True)
 schedule_app  = typer.Typer(help="Schedule recurring fetches via cron (POSIX) or Task Scheduler (Windows).", no_args_is_help=True)
 integrate_app = typer.Typer(help="Generate connector configs for third-party data-pipeline tools (Enterprise plan).", no_args_is_help=True)
+library_app   = typer.Typer(help="Manage the library directory where eolas data files are cached.", no_args_is_help=True)
 app.add_typer(datasets_app,  name="datasets")
 app.add_typer(auth_app,      name="auth")
 app.add_typer(schedule_app,  name="schedule")
 app.add_typer(integrate_app, name="integrate")
+app.add_typer(library_app,   name="library")
 
 # Errors go to stderr, data to stdout — important for piping.
 err_console = Console(stderr=True)
@@ -1116,6 +1119,95 @@ def integrate_adf(
             "[yellow]experimental:[/yellow] Azure Data Factory output is "
             "structure-verified but not yet end-to-end tested against a real subscription."
         )
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# library subcommands — manage the persistent data-file directory
+# ────────────────────────────────────────────────────────────────────────────
+
+@library_app.command("set")
+def library_set_cmd(
+    path: Optional[str] = typer.Argument(
+        None,
+        help=(
+            "Directory to use as the eolas library. "
+            "Omit to be prompted interactively."
+        ),
+    ),
+) -> None:
+    """Set the library directory where eolas data files are cached.
+
+    The path is written to ~/.eolas/config.json as 'library_dir' and used
+    by get_local() and the smart-routing path in get() on all future calls.
+    This takes precedence over the ~/.cache/eolas/ fallback and is also read
+    by the R eolas client (same config file).
+
+    Examples
+    --------
+        eolas library set ~/eolas-library
+        eolas library set /data/eolas
+        eolas library set          # interactive prompt
+    """
+    if path is None:
+        if not sys.stdin.isatty():
+            _bail(
+                "no path provided and stdin is not a terminal. "
+                "Pass the path as an argument: eolas library set /path/to/lib",
+                EXIT_USAGE,
+            )
+        path = typer.prompt("Library directory path")
+
+    if not path:
+        _bail("path cannot be empty", EXIT_USAGE)
+
+    try:
+        resolved = library_set(path)
+    except Exception as e:
+        _bail(f"failed to write config: {e}", EXIT_GENERIC)
+
+    typer.echo(f"library_dir set to {resolved}")
+    typer.echo(f"  config file: {Path.home() / '.eolas' / 'config.json'}")
+
+
+@library_app.command("status")
+def library_status_cmd() -> None:
+    """Show the current library directory and which source supplies it.
+
+    Checks all sources in precedence order:
+    1. EOLAS_LIBRARY environment variable
+    2. library_dir in ~/.eolas/config.json
+    3. ~/.cache/eolas/ (transient fallback)
+    """
+    info = library_status()
+    source_labels = {
+        "env":      "env EOLAS_LIBRARY",
+        "config":   str(Path.home() / ".eolas" / "config.json"),
+        "fallback": "fallback (transient — configure a library for reproducibility)",
+    }
+    label = source_labels.get(info["source"], info["source"])
+    typer.echo(f"library: {info['path']}\nsource:  {label}")
+    if info["source"] == "fallback":
+        typer.echo(
+            "\nTo set a persistent library:\n"
+            "  eolas library set ~/eolas-library\n"
+            "  export EOLAS_LIBRARY=/path/to/lib"
+        )
+
+
+@library_app.command("clear")
+def library_clear_cmd() -> None:
+    """Remove library_dir from ~/.eolas/config.json.
+
+    After clearing, get_local() falls back to ~/.cache/eolas/ (or the
+    EOLAS_LIBRARY env var if set).
+    """
+    try:
+        library_clear()
+    except Exception as e:
+        _bail(f"failed to update config: {e}", EXIT_GENERIC)
+    typer.echo(
+        f"library_dir removed from {Path.home() / '.eolas' / 'config.json'}"
+    )
 
 
 # Allow `python -m eolas_data.cli`

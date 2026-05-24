@@ -30,23 +30,37 @@ meta         = client.info("nz_cpi")
 
 Get an API key at <https://eolas.fyi/signup>. Free plan is 10 requests/month; Pro ($49/month) is unlimited.
 
-## Save your API key (workstation)
+## Quick setup (workstation)
 
-Tired of pasting your key into every new session? Save it once to the OS keyring (macOS Keychain / Windows Credential Manager / Linux Secret Service):
+Two one-off commands make every future session frictionless:
+
+**1. Save your API key** to the OS keyring (macOS Keychain / Windows Credential Manager / Linux Secret Service) so `Client()` finds it automatically — no env var, no pasting:
 
 ```bash
 pip install 'eolas-data[secure]'   # adds the keyring package
 eolas auth save-key                # interactive prompt
 ```
 
-After that, `Client()` finds it automatically — no environment variable, no config file:
-
 ```python
 from eolas_data import Client
-client = Client()   # key read from OS keyring
+client = Client()   # key read from OS keyring automatically
 ```
 
-In R, the same slot is used — a key saved from Python is immediately readable from R and vice versa (see the [R client README](https://github.com/phildonovan/eolas-r)).
+**2. Set a library directory** so downloaded bulk files land somewhere permanent instead of the transient `~/.cache/eolas/` OS cache:
+
+```bash
+eolas library set ~/eolas-library  # writes to ~/.eolas/config.json
+```
+
+Or set the env var instead (useful for CI / Docker):
+
+```bash
+export EOLAS_LIBRARY=~/eolas-library
+```
+
+After setting the library, `client.get_local("nz_parcels")` and the smart-routing in `client.get("nz_parcels")` will use `~/eolas-library/` automatically.
+
+The keyring slot and config file are shared with the R `eolas` client — a key saved from Python is immediately readable from R and vice versa (see the [R client README](https://github.com/phildonovan/eolas-r)).
 
 ---
 

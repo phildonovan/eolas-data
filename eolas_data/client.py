@@ -21,6 +21,7 @@ from .exceptions import (
     NotFoundError,
     RateLimitError,
 )
+from .library import resolve_library_dir
 
 _log = logging.getLogger("eolas_data")
 
@@ -1017,7 +1018,7 @@ class Client:
         self,
         name: Union[str, "DatasetName"],
         *,
-        cache_dir: Union[str, "pathlib.Path"] = "~/.cache/eolas",
+        cache_dir: Optional[Union[str, "pathlib.Path"]] = None,
         format: Optional[str] = None,
         freshness: str = "auto",
         as_geo: bool = True,
@@ -1042,7 +1043,7 @@ class Client:
         self,
         name: Union[str, "DatasetName"],
         *,
-        cache_dir: Union[str, "pathlib.Path"] = "~/.cache/eolas",
+        cache_dir: Optional[Union[str, "pathlib.Path"]] = None,
         format: Optional[str] = None,
         freshness: str = "auto",
         as_geo: bool = True,
@@ -1051,11 +1052,11 @@ class Client:
 
         This is the recommended path for large or geospatial datasets in a
         notebook workflow.  On the first call it fetches the bulk file from
-        CDN (milliseconds for monthly snapshots) and writes it to
-        ``~/.cache/eolas/``.  On subsequent calls in the same or future
-        sessions a lightweight HEAD request checks whether the file is still
-        current; if so the local copy is read directly with zero network I/O
-        on the data payload.
+        CDN (milliseconds for monthly snapshots) and writes it to the
+        configured library directory (see :func:`eolas_data.library.resolve_library_dir`).
+        On subsequent calls in the same or future sessions a lightweight HEAD
+        request checks whether the file is still current; if so the local copy
+        is read directly with zero network I/O on the data payload.
 
         If you have been calling ``client.get("nz_parcels")`` on a 3-million-
         row geospatial dataset and it takes 15+ minutes, use ``get_local``
@@ -1066,7 +1067,11 @@ class Client:
             name: Dataset identifier, e.g. ``"nz_parcels"``.
             cache_dir: Local directory for cached files.  Accepts ``~``-prefixed
                 strings, ``str``, or ``pathlib.Path``.  The directory is
-                created if it does not exist.  Defaults to ``~/.cache/eolas/``.
+                created if it does not exist.  ``None`` (default) resolves via
+                the library precedence chain (``EOLAS_LIBRARY`` env var →
+                ``library_dir`` in ``~/.eolas/config.json`` → interactive
+                prompt on first TTY call → ``~/.cache/eolas/`` fallback).
+                An explicit value here always wins (highest priority).
             format: ``"parquet"``, ``"csv_gz"``, or ``"geoparquet"``.  ``None``
                 (default) auto-detects: calls ``self.info(name)`` and checks
                 whether the dataset metadata indicates geometry; geo datasets
@@ -1106,7 +1111,7 @@ class Client:
             # Non-geo dataset
             df = client.get_local("nz_cpi")
 
-            # Custom cache dir
+            # Explicit cache dir (overrides library config — highest priority)
             df = client.get_local("nz_cpi", cache_dir="/tmp/eolas-cache")
 
             # Force CSV format
@@ -1120,7 +1125,12 @@ class Client:
             https://docs.eolas.fyi/bulk-downloads/
         """
         # ---- resolve cache_dir -----------------------------------------------
-        cache_path = pathlib.Path(cache_dir).expanduser().resolve()
+        # Explicit cache_dir= arg wins outright (Step 1 of the precedence chain).
+        # None triggers the library resolver (Steps 2-5).
+        if cache_dir is not None:
+            cache_path = pathlib.Path(cache_dir).expanduser().resolve()
+        else:
+            cache_path = resolve_library_dir()
         cache_path.mkdir(parents=True, exist_ok=True)
 
         # ---- auto-detect format if not specified -----------------------------
@@ -1295,7 +1305,7 @@ class Client:
                         _auto_route_notified.add(name_str)
                         _log.info(
                             "auto-routing %r through cache+sync (large/geo dataset). "
-                            "Cache lives at ~/.cache/eolas/. Use mode='live' to override.",
+                            "Use mode='live' to override, or `eolas library status` to see cache location.",
                             name_str,
                         )
                     as_geo_for_local = True if as_geo is None else bool(as_geo)
