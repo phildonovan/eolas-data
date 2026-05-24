@@ -30,6 +30,26 @@ meta         = client.info("nz_cpi")
 
 Get an API key at <https://eolas.fyi/signup>. Free plan is 10 requests/month; Pro ($49/month) is unlimited.
 
+## Save your API key (workstation)
+
+Tired of pasting your key into every new session? Save it once to the OS keyring (macOS Keychain / Windows Credential Manager / Linux Secret Service):
+
+```bash
+pip install 'eolas-data[secure]'   # adds the keyring package
+eolas auth save-key                # interactive prompt
+```
+
+After that, `Client()` finds it automatically — no environment variable, no config file:
+
+```python
+from eolas_data import Client
+client = Client()   # key read from OS keyring
+```
+
+In R, the same slot is used — a key saved from Python is immediately readable from R and vice versa (see the [R client README](https://github.com/phildonovan/eolas-r)).
+
+---
+
 ## Command-line interface
 
 `pip install eolas-data[cli]` adds an `eolas` command for browsing, fetching, and
@@ -38,7 +58,11 @@ auto-detects piping: rich tables in a terminal, newline-delimited JSON when
 stdout is piped.
 
 ```bash
-# one-time setup
+# one-time setup (OS keyring — recommended)
+pip install 'eolas-data[secure]'
+eolas auth save-key
+
+# or config file (no extra install)
 eolas auth set-key
 eolas health
 

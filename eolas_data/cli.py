@@ -27,7 +27,7 @@ import time
 
 from . import __version__
 from . import schedule as _schedule
-from .client import Client
+from .client import Client, _KEYRING_SERVICE, _KEYRING_USERNAME, _keyring_get
 from .exceptions import (
     APIError,
     AuthenticationError,
@@ -63,7 +63,7 @@ app           = typer.Typer(
     add_completion=True,
 )
 datasets_app  = typer.Typer(help="Browse and inspect datasets.", no_args_is_help=True)
-auth_app      = typer.Typer(help="Manage your API key (env var or ~/.eolas/config.json).", no_args_is_help=True)
+auth_app      = typer.Typer(help="Manage your API key (env var, OS keyring, or ~/.eolas/config.json).", no_args_is_help=True)
 schedule_app  = typer.Typer(help="Schedule recurring fetches via cron (POSIX) or Task Scheduler (Windows).", no_args_is_help=True)
 integrate_app = typer.Typer(help="Generate connector configs for third-party data-pipeline tools (Enterprise plan).", no_args_is_help=True)
 app.add_typer(datasets_app,  name="datasets")
@@ -80,10 +80,13 @@ err_console = Console(stderr=True)
 # ────────────────────────────────────────────────────────────────────────────
 
 def _load_api_key() -> str:
-    """Resolve the API key. Precedence: env var → config file → empty."""
+    """Resolve the API key. Precedence: env var → OS keyring → config file → empty."""
     v = os.getenv("EOLAS_API_KEY")
     if v:
         return v
+    kr = _keyring_get()
+    if kr:
+        return kr
     if CONFIG_FILE.exists():
         try:
             return json.loads(CONFIG_FILE.read_text()).get("api_key", "")
@@ -712,12 +715,95 @@ def auth_set_key(
     typer.echo(f"saved {CONFIG_FILE}")
 
 
+@auth_app.command("save-key")
+def auth_save_key(
+    key: Optional[str] = typer.Argument(
+        None,
+        help="API key to save. Omit to be prompted interactively.",
+    ),
+) -> None:
+    """Save your API key to the OS keyring (macOS Keychain / Windows Credential Manager / Linux Secret Service).
+
+    Requires the 'secure' extra: pip install 'eolas-data[secure]'
+
+    The key is stored under service="eolas", username="api-key" — the same
+    slot that the R client reads, so a key saved from Python is visible from R
+    and vice versa.
+
+    Examples
+    --------
+        eolas auth save-key
+        eolas auth save-key vs_mykey
+        echo vs_mykey | eolas auth save-key
+    """
+    try:
+        import keyring as _kr
+    except ImportError:
+        _bail(
+            "OS-keyring support requires the 'secure' extra: "
+            "pip install 'eolas-data[secure]'",
+            EXIT_USAGE,
+        )
+
+    # Key may come from: positional arg, stdin pipe, or interactive prompt.
+    if key is None:
+        if not sys.stdin.isatty():
+            # Piped input — strip trailing newline.
+            key = sys.stdin.read().strip()
+        else:
+            key = typer.prompt("API key", hide_input=True)
+
+    if not key:
+        _bail("API key cannot be empty", EXIT_USAGE)
+
+    try:
+        _kr.set_password(_KEYRING_SERVICE, _KEYRING_USERNAME, key)
+    except Exception as exc:
+        _bail(f"keyring write failed: {exc}", EXIT_GENERIC)
+
+    typer.echo(f"saved key {_mask(key)} to OS keyring (service={_KEYRING_SERVICE!r})")
+
+
+@auth_app.command("clear-key")
+def auth_clear_key() -> None:
+    """Remove the API key from the OS keyring.
+
+    Requires the 'secure' extra: pip install 'eolas-data[secure]'
+    """
+    try:
+        import keyring as _kr
+    except ImportError:
+        _bail(
+            "OS-keyring support requires the 'secure' extra: "
+            "pip install 'eolas-data[secure]'",
+            EXIT_USAGE,
+        )
+
+    try:
+        _kr.delete_password(_KEYRING_SERVICE, _KEYRING_USERNAME)
+        typer.echo("cleared API key from OS keyring")
+    except _kr.errors.PasswordDeleteError:
+        typer.echo("no API key found in OS keyring (nothing to clear)")
+    except Exception as exc:
+        _bail(f"keyring delete failed: {exc}", EXIT_GENERIC)
+
+
 @auth_app.command("status")
 def auth_status() -> None:
-    """Show the resolved API key (masked) and which source supplied it."""
+    """Show the resolved API key (masked) and which source supplied it.
+
+    Checks all sources in precedence order:
+    1. EOLAS_API_KEY environment variable
+    2. OS keyring (if 'secure' extra installed)
+    3. ~/.eolas/config.json (config file)
+    """
     v = os.getenv("EOLAS_API_KEY")
     if v:
         typer.echo(f"key:    {_mask(v)}\nsource: env EOLAS_API_KEY")
+        return
+    kr = _keyring_get()
+    if kr:
+        typer.echo(f"key:    {_mask(kr)}\nsource: OS keyring (service={_KEYRING_SERVICE!r})")
         return
     if CONFIG_FILE.exists():
         try:
@@ -726,12 +812,18 @@ def auth_status() -> None:
             _bail(f"could not read {CONFIG_FILE}: {e}")
         typer.echo(f"key:    {_mask(k)}\nsource: {CONFIG_FILE}")
         return
-    typer.echo("no API key configured\nset one with: eolas auth set-key")
+    typer.echo(
+        "no API key configured\n"
+        "options:\n"
+        "  eolas auth save-key           # OS keyring (recommended for workstations)\n"
+        "  eolas auth set-key            # config file\n"
+        "  export EOLAS_API_KEY=vs_...   # environment variable"
+    )
 
 
 @auth_app.command("clear")
 def auth_clear() -> None:
-    """Remove ~/.eolas/config.json (does not unset env vars)."""
+    """Remove ~/.eolas/config.json (does not unset env vars or clear keyring)."""
     if CONFIG_FILE.exists():
         CONFIG_FILE.unlink()
         typer.echo(f"removed {CONFIG_FILE}")

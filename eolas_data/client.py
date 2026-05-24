@@ -30,6 +30,30 @@ BASE_URL = "https://api.eolas.fyi"
 
 _SIDECAR_SCHEMA_VERSION = 1
 
+# OS-keyring constants — service name must match the R client so a key set
+# from one language is readable from the other.
+_KEYRING_SERVICE  = "eolas"
+_KEYRING_USERNAME = "api-key"
+
+
+def _keyring_get() -> str:
+    """Return the API key from the OS keyring, or an empty string.
+
+    Silently returns ``""`` when:
+    - the ``keyring`` package is not installed
+    - no entry exists under service="eolas", username="api-key"
+    - the keyring backend is locked / unavailable (headless CI)
+
+    Never raises — the caller treats a falsy return as "not found" and falls
+    through to the next lookup step (config file or error).
+    """
+    try:
+        import keyring as _kr
+        value = _kr.get_password(_KEYRING_SERVICE, _KEYRING_USERNAME)
+        return value or ""
+    except Exception:
+        return ""
+
 
 @dataclass
 class SyncResult:
@@ -115,7 +139,13 @@ class Client:
         base_url: str = BASE_URL,
         cache: bool = False,
     ):
-        self._key   = api_key or os.getenv("EOLAS_API_KEY") or ""
+        # Precedence: explicit arg → EOLAS_API_KEY env var → OS keyring → ""
+        self._key = (
+            api_key
+            or os.getenv("EOLAS_API_KEY")
+            or _keyring_get()
+            or ""
+        )
         self._base  = base_url.rstrip("/")
         self._cache: dict | None = {} if cache else None
         self._session = requests.Session()
