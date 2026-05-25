@@ -205,6 +205,26 @@ gdf = client.get("nz_addresses")                  # GeoDataFrame
 df  = client.get("nz_addresses", as_geo=False)    # plain DataFrame, WKT preserved
 ```
 
+## Working with large geo datasets
+
+The 5.4M-row `linz.nz_parcels` table allocates ~10 GB when materialised as a GeoDataFrame. Pass `as_arrow=True` to skip all shapely allocation and get a zero-copy `pyarrow.Table` instead — geometry stays as Arrow buffers until you need it:
+
+```python
+# Zero-copy Arrow table — no shapely allocation
+tbl = client.linz("nz_parcels", as_arrow=True)
+
+# Filter before materialising — dramatically cheaper than loading the full GeoDataFrame
+import duckdb
+result = duckdb.sql("""
+    SELECT parcel_id, geometry_wkt
+    FROM tbl
+    WHERE ST_Within(ST_GeomFromText(geometry_wkt),
+                    ST_GeomFromText('POLYGON((174.7 -41.3, 174.8 -41.3, 174.8 -41.4, 174.7 -41.4, 174.7 -41.3))'))
+""").df()
+```
+
+`as_arrow=True` works on all datasets (geo or non-geo), all routing modes (live, cached, auto), and all source helpers. It cannot be combined with `as_geo=True`.
+
 ## Polars
 
 ```bash

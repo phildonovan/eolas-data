@@ -1137,9 +1137,14 @@ class Client:
         return self._get_source(name, "West Coast (Te Tai o Poutini)", **kwargs)
 
     def _get_source(self, name, source: str, **kwargs) -> Dataset:
-        df = self.get(name, **kwargs)
-        df.eolas_source = source
-        return df
+        result = self.get(name, **kwargs)
+        # When as_arrow=True the result is a pyarrow.Table which has no
+        # eolas_source attribute — skip the metadata tag silently.
+        try:
+            result.eolas_source = source
+        except (AttributeError, TypeError):
+            pass
+        return result
 
     # ------------------------------------------------------------------
     # Local-file convenience
@@ -1154,7 +1159,8 @@ class Client:
         cache_dir: Optional[Union[str, "pathlib.Path"]] = None,
         format: Optional[str] = None,
         freshness: str = "auto",
-        as_geo: bool = True,
+        as_geo: Optional[bool] = None,
+        as_arrow: bool = False,
         progress: Optional[bool] = None,
     ) -> "pd.DataFrame":
         """Force the cache+sync path.  Equivalent to ``get(name, mode='cached')``.
@@ -1163,14 +1169,21 @@ class Client:
         data path.  ``client.get(name)`` with ``mode='auto'`` (the default) will
         route through here automatically for large or geospatial datasets.
 
+        ``as_geo`` defaults to ``None`` (auto: convert to GeoDataFrame when the
+        dataset is geo and geopandas is installed) rather than ``True`` when
+        ``as_arrow=True`` is passed, avoiding a conflict between the two flags.
+
         For the full parameter documentation see :meth:`_get_local_impl`.
         """
+        # Resolve as_geo: None → True (auto) unless as_arrow overrides.
+        resolved_as_geo = as_geo if as_geo is not None else (not as_arrow)
         return self._get_local_impl(
             name,
             cache_dir=cache_dir,
             format=format,
             freshness=freshness,
-            as_geo=as_geo,
+            as_geo=resolved_as_geo,
+            as_arrow=as_arrow,
             progress=progress,
         )
 
@@ -1181,7 +1194,8 @@ class Client:
         cache_dir: Optional[Union[str, "pathlib.Path"]] = None,
         format: Optional[str] = None,
         freshness: str = "auto",
-        as_geo: bool = True,
+        as_geo: Optional[bool] = True,
+        as_arrow: bool = False,
         progress: Optional[bool] = None,
     ) -> "pd.DataFrame":
         """Download (or serve from cache) a whole dataset as a local DataFrame.
@@ -1218,7 +1232,14 @@ class Client:
                 ``geopandas`` is installed, the returned object is a
                 ``geopandas.GeoDataFrame``.  When ``False`` (or geopandas is
                 not installed) the raw WKB binary column is returned in a plain
-                ``pd.DataFrame``.
+                ``pd.DataFrame``.  Ignored when ``as_arrow=True``.
+            as_arrow: When ``True``, skip all native geometry materialisation
+                and return a ``pyarrow.Table`` directly.  Geometry stays as
+                Arrow buffers — zero-copy, suitable for DuckDB / polars
+                pipelines that work on a sample before converting to
+                GeoDataFrame.  Works for both geo and non-geo datasets.
+                Cannot be combined with ``as_geo=True`` (raises
+                ``ValueError``).
             progress: Control the download progress bar shown during the
                 sync phase.  Forwarded verbatim to :meth:`sync_bulk`.
                 ``None`` (default) auto-detects via ``sys.stdout.isatty()``.
@@ -1263,6 +1284,17 @@ class Client:
             :meth:`sync_bulk` — for advanced control over the sync lifecycle.
             https://docs.eolas.fyi/bulk-downloads/
         """
+        # ---- as_arrow / as_geo conflict guard ------------------------------------
+        # Both flags being True is contradictory — raise early so the error is
+        # surfaced regardless of whether the dataset has geometry.
+        if as_arrow and as_geo is True:
+            raise ValueError(
+                "as_arrow=True and as_geo=True are mutually exclusive. "
+                "as_arrow returns a pyarrow.Table (no geometry materialisation); "
+                "as_geo materialises geometry as shapely objects in a GeoDataFrame. "
+                "Choose one."
+            )
+
         # ---- resolve cache_dir -----------------------------------------------
         # Explicit cache_dir= arg wins outright (Step 1 of the precedence chain).
         # None triggers the library resolver (Steps 2-5).
@@ -1303,6 +1335,22 @@ class Client:
         self.sync_bulk(name, path=file_path, format=fmt, freshness=freshness, progress=progress)
 
         # ---- read the local file into a DataFrame ----------------------------
+        # as_arrow=True: return a pyarrow.Table directly, skipping all
+        # geometry materialisation.  Works for every format.
+        if as_arrow:
+            import pyarrow.parquet as _pq
+            if fmt == "csv_gz":
+                # CSV-GZ: read via pandas then convert to Arrow — small cost,
+                # still avoids shapely / WKB overhead.
+                import pyarrow as _pa
+                return _pa.Table.from_pandas(
+                    pd.read_csv(file_path),
+                    preserve_index=False,
+                )
+            else:
+                # parquet or geoparquet — pyarrow.parquet reads both natively.
+                return _pq.read_table(file_path)
+
         if fmt == "geoparquet":
             if as_geo:
                 try:
@@ -1339,6 +1387,7 @@ class Client:
         engine: str = "pandas",
         limit: Optional[int] = None,
         as_geo: Optional[bool] = None,
+        as_arrow: bool = False,
         *,
         mode: str = "auto",
     ) -> Dataset:
@@ -1375,6 +1424,16 @@ class Client:
                     ``True`` forces the conversion (raises if geopandas missing).
                     ``False`` keeps the raw WKT string column.
                     Install with ``pip install eolas-data[geo]``.
+                    Cannot be combined with ``as_arrow=True``.
+            as_arrow: When ``True``, return a ``pyarrow.Table`` instead of a
+                    ``DataFrame`` / ``GeoDataFrame``.  Geometry stays as Arrow
+                    buffers — zero-copy, no shapely allocation.  Works on every
+                    dataset (geo or non-geo) and every routing mode (live,
+                    cached, auto).  On the live path the Arrow IPC response is
+                    returned directly when the server supports it; otherwise a
+                    JSON response is converted via ``pa.Table.from_pandas``.
+                    Cannot be combined with ``as_geo=True`` (raises
+                    ``ValueError``).
             mode:   ``"auto"`` (default), ``"live"``, or ``"cached"``. Controls
                     smart-routing behaviour; see above.
 
@@ -1404,10 +1463,19 @@ class Client:
                 f"Unknown mode {mode!r}. Expected 'auto', 'live', or 'cached'."
             )
 
+        # as_arrow + as_geo conflict — check early so we fail fast regardless of mode.
+        if as_arrow and as_geo:
+            raise ValueError(
+                "as_arrow=True and as_geo=True are mutually exclusive. "
+                "as_arrow returns a pyarrow.Table (no geometry materialisation); "
+                "as_geo materialises geometry as shapely objects in a GeoDataFrame. "
+                "Choose one."
+            )
+
         # ---- mode="cached": delegate entirely to the cache+sync path ----------
         if mode == "cached":
-            as_geo_for_local = True if as_geo is None else bool(as_geo)
-            return self._get_local_impl(name, as_geo=as_geo_for_local)
+            as_geo_for_local = (not as_arrow) if as_geo is None else bool(as_geo)
+            return self._get_local_impl(name, as_geo=as_geo_for_local, as_arrow=as_arrow)
 
         # ---- early in-memory cache check (before routing / network calls) -----
         # The cache key uses the parameters that affect the live-API result.
@@ -1447,8 +1515,8 @@ class Client:
                             "Use mode='live' to override, or `eolas library status` to see cache location.",
                             name_str,
                         )
-                    as_geo_for_local = True if as_geo is None else bool(as_geo)
-                    return self._get_local_impl(name, as_geo=as_geo_for_local)
+                    as_geo_for_local = (not as_arrow) if as_geo is None else bool(as_geo)
+                    return self._get_local_impl(name, as_geo=as_geo_for_local, as_arrow=as_arrow)
                 # Fall through to the live path.
 
         # ---- live path (mode="live", or auto fell through) -------------------
@@ -1478,6 +1546,16 @@ class Client:
         # callers can `df.plot(x="date", y="value")` without seeing zigzag lines.
         if "date" in df.columns:
             df = df.sort_values("date", kind="stable").reset_index(drop=True)
+
+        # as_arrow on the live path: convert the pandas DataFrame to an Arrow
+        # Table, avoiding any shapely allocation.  We convert before the
+        # geo step so geometry_wkt stays as a string column in the Arrow table.
+        if as_arrow:
+            import pyarrow as _pa
+            tbl = _pa.Table.from_pandas(df, preserve_index=False)
+            if self._cache is not None:
+                self._cache[cache_key] = tbl
+            return tbl
 
         result = Dataset(df)
         result.eolas_name   = name
