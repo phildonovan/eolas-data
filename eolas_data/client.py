@@ -23,6 +23,8 @@ from .exceptions import (
     RateLimitError,
 )
 from .library import resolve_library_dir
+from .sync.sync import SyncResult as _SyncResult  # noqa: F401 — re-exported below
+from .sync.sync import sync_dataset as _sync_dataset
 
 _log = logging.getLogger("eolas_data")
 
@@ -547,6 +549,99 @@ class Client:
             current_snapshot_id=current_sid,
             path=out,
             bytes_downloaded=bytes_dl,
+        )
+
+    # ------------------------------------------------------------------
+    # Multi-file directory sync (pipeline verb)
+    # ------------------------------------------------------------------
+
+    def sync(
+        self,
+        name: Union[str, "DatasetName"],
+        *,
+        library_dir: Optional[Union[str, "pathlib.Path"]] = None,
+        progress: Optional[bool] = None,
+    ) -> "_SyncResult":
+        """Incrementally sync a dataset into a multi-file local directory.
+
+        This is the **pipeline verb** for eolas: it keeps a local copy of a
+        dataset up to date with minimal bandwidth.  On the first call a full
+        bulk snapshot is downloaded.  On subsequent calls only the delta since
+        the last sync is fetched (when the server supports incremental
+        delivery); if incremental delivery is unavailable a fresh full
+        snapshot is downloaded instead.
+
+        The synced dataset lives in ``library_dir/<name>/`` as a collection
+        of parquet files plus a ``_eolas-manifest.json`` lineage file.
+        Read the directory as a single logical table with::
+
+            import pyarrow.dataset as ds
+            table = ds.dataset("library_dir/nz_parcels").to_table()
+
+            # or with DuckDB:
+            import duckdb
+            df = duckdb.query("SELECT * FROM read_parquet('library_dir/nz_parcels/*.parquet')").df()
+
+        Args:
+            name:        Dataset identifier, e.g. ``"doc_huts"`` or
+                         ``"nz_parcels"``.
+            library_dir: Root directory of the local data library.  A
+                         sub-directory named ``<name>`` is created inside
+                         (e.g. ``library_dir/doc_huts/``).  ``None``
+                         (default) resolves via the library precedence
+                         chain — see :func:`eolas_data.library.resolve_library_dir`.
+            progress:    Tri-state progress bar override.  ``None`` (default)
+                         auto-detects via ``sys.stdout.isatty()``.  ``True``
+                         forces the bar on; ``False`` forces it off.
+
+        Returns:
+            A :class:`~eolas_data.sync.sync.SyncResult` with:
+
+            - ``status``: ``"snapshot_full"``, ``"snapshot_delta"``, or
+              ``"unchanged"``
+            - ``bytes_downloaded``: bytes written to disk (``0`` if unchanged)
+            - ``rows_added``: new rows in this sync (``0`` if unchanged)
+            - ``files_added``: new parquet files written (``0`` if unchanged)
+            - ``dataset``: the dataset name
+            - ``library_dir``: the resolved library root path
+
+        Raises:
+            BulkUpgradeRequired: HTTP 402 — snapshot requires Pro plan.
+            BulkLicenceRestricted: HTTP 403 — dataset excluded from bulk.
+            BulkNotYetAvailable: HTTP 503 — monthly snapshot not yet generated.
+            NotFoundError: Dataset not found.
+            AuthenticationError: Invalid or missing API key.
+
+        Examples::
+
+            from eolas_data import Client
+            client = Client("your_api_key")
+
+            # First sync: full download (~seconds from CDN)
+            r = client.sync("doc_huts", library_dir="/data/nz-warehouse")
+            print(r)  # <SyncResult dataset='doc_huts' status='snapshot_full' ...>
+
+            # Second sync: unchanged → zero I/O
+            r = client.sync("doc_huts", library_dir="/data/nz-warehouse")
+            print(r.status)  # 'unchanged'
+
+            # Inspect files written
+            import pathlib
+            for f in sorted(pathlib.Path("/data/nz-warehouse/doc_huts").iterdir()):
+                print(f.name)
+            # _eolas-manifest.json
+            # snapshot-2026-05-27.parquet  (or .geo.parquet for geo datasets)
+        """
+        if library_dir is None:
+            resolved_lib = resolve_library_dir(interactive=False)
+        else:
+            resolved_lib = pathlib.Path(library_dir).expanduser().resolve()
+
+        return _sync_dataset(
+            self,
+            str(name),
+            library_dir=resolved_lib,
+            progress=progress,
         )
 
     # ------------------------------------------------------------------
