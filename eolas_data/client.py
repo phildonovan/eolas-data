@@ -1682,6 +1682,26 @@ class Client:
                 "Choose one."
             )
 
+        # ---- library ParquetDataset read (mode != "live", manifest present) ------
+        # When the caller has used `client.sync()` to maintain a multi-file
+        # dataset directory, reading it via PyArrow's ParquetDataset is much
+        # faster than re-downloading.  We check for this before any network I/O:
+        # if `library_dir/<name>/_eolas-manifest.json` exists, read all parquet
+        # files in that directory as one logical table.
+        #
+        # Conditions to route through the library:
+        #   1. mode is NOT "live" (live always goes to the API)
+        #   2. No slice kwargs (start/end/limit) — the full table is in the dir
+        #   3. library_dir resolves + manifest file exists
+        if mode != "live":
+            has_slice = (start is not None) or (end is not None) or (limit is not None)
+            if not has_slice:
+                _lib_result = self._try_read_from_library(
+                    name, as_arrow=as_arrow, as_geo=as_geo
+                )
+                if _lib_result is not None:
+                    return _lib_result
+
         # ---- mode="cached": delegate entirely to the cache+sync path ----------
         if mode == "cached":
             as_geo_for_local = (not as_arrow) if as_geo is None else bool(as_geo)
@@ -1792,6 +1812,127 @@ class Client:
             self._cache[cache_key] = result
 
         return result
+
+    # ------------------------------------------------------------------
+    # Library ParquetDataset read (multi-file sync model)
+    # ------------------------------------------------------------------
+
+    def _try_read_from_library(
+        self,
+        name: Union[str, "DatasetName"],
+        *,
+        as_arrow: bool = False,
+        as_geo: Optional[bool] = None,
+    ):
+        """Return a DataFrame/Table from the library if a synced manifest exists.
+
+        Checks whether ``library_dir/<name>/_eolas-manifest.json`` exists.
+        If so, reads all parquet files in that directory as one logical table
+        via ``pyarrow.dataset.dataset()`` (which handles schema evolution and
+        multiple files transparently) and returns the result.
+
+        Returns ``None`` when:
+        - no library_dir is configured (``EOLAS_LIBRARY`` unset, no config)
+        - the manifest file does not exist (dataset not synced yet)
+        - pyarrow is not installed
+
+        This is the "magic" path: after a ``client.sync()`` call the user can
+        call ``client.get()`` / ``client.linz()`` etc. and get fast disk reads
+        transparently.
+        """
+        # Resolve the library directory (non-interactive so we never prompt).
+        try:
+            lib_dir = resolve_library_dir(interactive=False)
+        except Exception:
+            return None
+
+        # Only apply this fast-path when a real library was configured, not the
+        # fallback cache.  We detect the fallback by checking whether the path is
+        # the default cache dir — if the user hasn't explicitly set a library
+        # we don't want to accidentally read stale bulk-cache parquet files as
+        # "synced" datasets.
+        fallback = pathlib.Path.home() / ".cache" / "eolas"
+        env_set = bool(os.getenv("EOLAS_LIBRARY", "").strip())
+        config_set = bool(self._read_library_dir_from_config_static())
+        if not env_set and not config_set:
+            return None
+
+        dataset_dir = lib_dir / str(name)
+        from .sync.manifest import MANIFEST_FILENAME as _MF, read_manifest as _rm
+        manifest_path = dataset_dir / _MF
+        if not manifest_path.exists():
+            return None
+
+        # Manifest exists — read all parquet files as a single logical table.
+        try:
+            import pyarrow.dataset as _ds
+        except ImportError:
+            return None
+
+        # Collect all parquet files in the dataset directory.
+        data_files = sorted(
+            f for f in dataset_dir.iterdir()
+            if f.is_file() and (
+                f.name.endswith(".parquet") or f.name.endswith(".geo.parquet")
+            ) and not f.name.startswith(".")
+        )
+        if not data_files:
+            return None
+
+        name_str = str(name)
+        if name_str not in _auto_route_notified:
+            _auto_route_notified.add(name_str)
+            _log.info(
+                "reading %r from library_dir (%s). "
+                "Use mode='live' to bypass and hit the API instead.",
+                name_str,
+                dataset_dir,
+            )
+
+        try:
+            arrow_ds = _ds.dataset([str(f) for f in data_files], format="parquet")
+        except Exception:
+            return None
+
+        if as_arrow:
+            try:
+                tbl = arrow_ds.to_table()
+                return tbl
+            except Exception:
+                return None
+
+        # Convert to pandas.
+        try:
+            tbl = arrow_ds.to_table()
+            df = tbl.to_pandas()
+        except Exception:
+            return None
+
+        result = Dataset(df)
+        result.eolas_name   = name_str
+        result.eolas_source = ""
+
+        # Optional geopandas conversion — same logic as get() live path.
+        resolved_as_geo = (not as_arrow) if as_geo is None else bool(as_geo)
+        if resolved_as_geo and "geometry_wkt" in result.columns:
+            converted = _to_geodataframe(result, force=as_geo is True)
+            if converted is not None:
+                result = converted
+
+        return result
+
+    @staticmethod
+    def _read_library_dir_from_config_static() -> str:
+        """Read library_dir from config file without importing library module (avoids circular)."""
+        import json as _json
+        config_file = pathlib.Path.home() / ".eolas" / "config.json"
+        try:
+            if config_file.exists():
+                data = _json.loads(config_file.read_text())
+                return str(data.get("library_dir", "") or "")
+        except Exception:
+            pass
+        return ""
 
     # ------------------------------------------------------------------
     # HTTP helpers

@@ -16,7 +16,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import typer
 from rich.console import Console
@@ -39,6 +39,7 @@ from .exceptions import (
     NotFoundError,
     RateLimitError,
 )
+from .sync.manifest import MANIFEST_FILENAME
 
 CONFIG_DIR = Path.home() / ".eolas"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -439,7 +440,9 @@ def download_cmd(
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# sync command — incremental "is my local file still current?" check
+# sync command — two modes:
+#   1. Pipeline mode (--library):  multi-file dataset directory (client.sync())
+#   2. Bulk-file mode (no --library): single-file HEAD-optimised sync (sync_bulk)
 # ────────────────────────────────────────────────────────────────────────────
 
 # Named duration aliases for --watch.
@@ -526,61 +529,205 @@ def _sync_timestamp() -> str:
     return now.strftime(f"%H:%M:%S {tz}")
 
 
+def _print_sync_result(result, *, json_mode: bool = False) -> None:
+    """Print a SyncResult from client.sync() in human or machine format."""
+    from .sync.sync import SyncResult as _LibSyncResult
+    if json_mode or not sys.stdout.isatty():
+        sys.stdout.write(json.dumps({
+            "dataset": result.dataset,
+            "status": result.status,
+            "bytes_downloaded": result.bytes_downloaded,
+            "rows_added": result.rows_added,
+            "files_added": result.files_added,
+            "library_dir": str(result.library_dir),
+            "error": result.error,
+        }, default=str))
+        sys.stdout.write("\n")
+        return
+
+    status = result.status
+    ds = result.dataset
+    if status == "unchanged":
+        Console().print(f"[dim]unchanged[/dim]  {ds}")
+    elif status == "snapshot_full":
+        size_str = _format_bytes(result.bytes_downloaded)
+        Console().print(
+            f"[green]synced[/green]     {ds}  "
+            f"[dim]({size_str}, full snapshot, {result.rows_added:,} rows)[/dim]"
+        )
+    elif status == "snapshot_delta":
+        size_str = _format_bytes(result.bytes_downloaded)
+        Console().print(
+            f"[green]synced[/green]     {ds}  "
+            f"[dim]({size_str}, +{result.rows_added:,} rows delta)[/dim]"
+        )
+    elif status == "error":
+        Console().print(
+            f"[red]error[/red]      {ds}  [dim]{result.error}[/dim]"
+        )
+    else:
+        Console().print(f"{status}  {ds}")
+
+
 @app.command(name="sync")
 def sync_cmd(
-    name:        str,
+    name:        Optional[str]  = typer.Argument(
+        None,
+        help=(
+            "Dataset name to sync (e.g. nz_parcels). Required unless --all is set."
+        ),
+    ),
+    # ---- Pipeline-sync options (multi-file directory model) ----------------
+    library:     Optional[Path] = typer.Option(
+        None, "--library",
+        help=(
+            "Root directory of your local data library. "
+            "When set, uses the pipeline sync model: each dataset gets its own "
+            "directory of parquet files + a manifest. "
+            "Read the merged table with PyArrow or DuckDB."
+        ),
+    ),
+    datasets:    Optional[List[str]] = typer.Option(
+        None, "--datasets",
+        help="Space-separated list of dataset names (pipeline mode only).",
+    ),
+    all_datasets: bool = typer.Option(
+        False, "--all",
+        help=(
+            "Sync every dataset that already has a manifest in --library "
+            "(pipeline mode only). Mutually exclusive with a positional name."
+        ),
+    ),
+    # ---- Legacy bulk-file options -------------------------------------------
     fmt:         str            = typer.Option(
         "parquet", "--format", "-f",
-        help="Output format: parquet (default) | csv | geoparquet.",
+        help="Output format: parquet (default) | csv | geoparquet. (bulk mode only)",
     ),
     freshness:   str            = typer.Option(
         "auto", "--freshness",
         help=(
-            "auto (default — server picks based on plan: Free→monthly, Pro→current) | "
-            "monthly | current"
+            "auto (default) | monthly | current. (bulk mode only)"
         ),
     ),
     out:         Optional[Path] = typer.Option(
         None, "--out", "-o",
         help=(
-            "Where to write the file. Defaults to <name>.<ext> in the current directory. "
-            "A sidecar file <out>.eolas-meta.json is written alongside."
+            "Where to write the file (bulk mode only). "
+            "Defaults to <name>.<ext> in the current directory."
         ),
     ),
     watch:       Optional[str]  = typer.Option(
         None, "--watch",
         help=(
-            "Run in a foreground loop. Parse a duration like '60', '30s', '5m', '1h', '1d', "
-            "or a named token: hourly, daily, weekly. "
-            "Prints one status line per iteration. Exit with Ctrl-C."
+            "Poll on a repeating schedule (bulk mode only). "
+            "e.g. '1h', 'daily', '30m'."
         ),
     ),
     no_progress: bool           = typer.Option(
         False, "--no-progress",
-        help=(
-            "Disable the download progress bar. Implied by --watch (each iteration "
-            "is a scripted check; bars would spam the log)."
-        ),
+        help="Disable the download progress bar.",
     ),
     api_key:     Optional[str]  = typer.Option(None, "--api-key"),
 ) -> None:
-    """Incrementally sync a bulk dataset — only re-download when the snapshot changes.
+    """Keep a local dataset copy up to date — only re-download when the data changes.
 
-    On each run, a lightweight HEAD request checks the server's X-Snapshot-Version
-    header. If the local file is already current, no data is transferred. The
-    data file is replaced atomically when an update is available, so in-flight
-    readers never see partial bytes.
+    Pipeline mode (--library): keeps a multi-file local directory per dataset.
+    Incremental deltas are fetched when available; falls back to a full snapshot
+    otherwise. Read the merged table with pyarrow.dataset or DuckDB glob.
 
-    A sidecar file (<out>.eolas-meta.json) records the snapshot id and is used
-    to perform the no-op check cheaply on subsequent calls.
+    Bulk mode (no --library): single-file HEAD-optimised sync (original behaviour).
 
     Examples
     --------
-        eolas sync nz_cpi
-        eolas sync nz_cpi --format csv --out ~/data/cpi.csv.gz
-        eolas sync nz_cpi --watch 1h          # poll every hour
-        eolas sync nz_cpi --watch daily        # poll once per day
+        eolas sync nz_parcels --library /data/nz-warehouse
+        eolas sync --library /data/nz-warehouse --datasets nz_parcels nz_addresses
+        eolas sync --library /data/nz-warehouse --all
+        eolas sync nz_cpi                             # bulk mode
+        eolas sync nz_cpi --watch 1h                  # poll every hour (bulk mode)
     """
+    # -------------------------------------------------------------------------
+    # Route: pipeline mode when --library is set.
+    # -------------------------------------------------------------------------
+    if library is not None:
+        lib_path = library.expanduser().resolve()
+        cli_client = _client(api_key)
+
+        # Validate mutually-exclusive positional vs --all
+        if name is not None and all_datasets:
+            _bail("cannot combine a positional dataset name with --all", EXIT_USAGE)
+        if name is not None and datasets:
+            _bail(
+                "cannot combine a positional dataset name with --datasets; "
+                "use --datasets NAME or pass NAME as the positional argument",
+                EXIT_USAGE,
+            )
+
+        # Single-dataset path: eolas sync <name> --library DIR
+        if name is not None:
+            try:
+                result = cli_client.sync(name, library_dir=lib_path,
+                                         progress=False if no_progress else None)
+            except EolasError as e:
+                _bail(str(e), _exit_for(e))
+            _print_sync_result(result)
+            if result.status == "error":
+                raise typer.Exit(code=EXIT_GENERIC)
+            return
+
+        # Multi-dataset path: --datasets X Y Z  OR  --all
+        if not all_datasets and not datasets:
+            _bail(
+                "pipeline mode requires a dataset name, --datasets, or --all. "
+                "Example: eolas sync nz_parcels --library /data/nz-warehouse",
+                EXIT_USAGE,
+            )
+
+        ds_list: Optional[list] = list(datasets) if datasets else None  # None = discover
+
+        try:
+            results = cli_client.sync_all(
+                library_dir=lib_path,
+                datasets=ds_list,
+                progress=False if no_progress else None,
+            )
+        except EolasError as e:
+            _bail(str(e), _exit_for(e))
+
+        if not results:
+            if all_datasets:
+                err_console.print(
+                    "[yellow]no datasets found in library[/yellow] "
+                    f"(no manifests in {lib_path})"
+                )
+            raise typer.Exit(code=EXIT_OK)
+
+        any_error = False
+        for r in results:
+            _print_sync_result(r)
+            if r.status == "error":
+                any_error = True
+
+        if any_error:
+            raise typer.Exit(code=EXIT_GENERIC)
+        return
+
+    # -------------------------------------------------------------------------
+    # Route: legacy bulk-file mode (no --library).
+    # -------------------------------------------------------------------------
+    if name is None:
+        _bail(
+            "dataset name is required (or use --library for pipeline mode). "
+            "Example: eolas sync nz_cpi  OR  eolas sync nz_parcels --library /data/nz-warehouse",
+            EXIT_USAGE,
+        )
+
+    if all_datasets or datasets:
+        _bail(
+            "--all and --datasets are only valid with --library. "
+            "Example: eolas sync --library /data/nz-warehouse --all",
+            EXIT_USAGE,
+        )
+
     fmt_lower = fmt.lower()
     if fmt_lower not in _DOWNLOAD_FORMAT_MAP:
         _bail(
@@ -608,7 +755,7 @@ def sync_cmd(
         except ValueError as e:
             _bail(str(e), EXIT_USAGE)
 
-    client = _client(api_key)
+    bulk_client = _client(api_key)
 
     # In watch mode progress bars are always disabled — each iteration is a
     # scripted background check and a fresh bar per poll would spam the log.
@@ -620,7 +767,7 @@ def sync_cmd(
 
     def _run_once() -> None:
         try:
-            result = client.sync_bulk(
+            result = bulk_client.sync_bulk(
                 name,
                 path=out,
                 format=server_fmt,
@@ -713,6 +860,154 @@ def sync_cmd(
         raise
     finally:
         signal.signal(signal.SIGINT, old_handler)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# compact command — merge all parquet files in a synced dataset dir
+# ────────────────────────────────────────────────────────────────────────────
+
+@app.command(name="compact")
+def compact_cmd(
+    dataset_dir: Optional[Path] = typer.Argument(
+        None,
+        help=(
+            "Path to a synced dataset directory, e.g. /data/nz-warehouse/nz_parcels. "
+            "Required unless --library is set."
+        ),
+    ),
+    library:  Optional[Path] = typer.Option(
+        None, "--library",
+        help=(
+            "Root library directory. Compacts every sub-directory that has a manifest. "
+            "Mutually exclusive with a positional dataset_dir."
+        ),
+    ),
+    dataset:  Optional[str]  = typer.Option(
+        None, "--dataset",
+        help="Limit --library compaction to a single named dataset.",
+    ),
+    api_key:  Optional[str]  = typer.Option(None, "--api-key"),
+) -> None:
+    """Merge delta files into a single snapshot, freeing disk space.
+
+    After several incremental syncs a dataset directory accumulates one snapshot
+    plus multiple delta files. compact() reads them all as one logical table via
+    PyArrow, writes a merged snapshot file, and removes the old files.
+
+    The operation is atomic: if anything fails mid-way the original files are
+    untouched.
+
+    Examples
+    --------
+        eolas compact /data/nz-warehouse/nz_parcels
+        eolas compact --library /data/nz-warehouse
+        eolas compact --library /data/nz-warehouse --dataset nz_parcels
+    """
+    compact_client = _client(api_key)
+
+    # ---- Validate argument combination ----
+    if dataset_dir is not None and library is not None:
+        _bail(
+            "cannot combine a positional dataset directory with --library. "
+            "Pass either a path or --library, not both.",
+            EXIT_USAGE,
+        )
+    if dataset_dir is None and library is None:
+        _bail(
+            "specify a dataset directory or use --library. "
+            "Example: eolas compact /data/nz-warehouse/nz_parcels",
+            EXIT_USAGE,
+        )
+
+    # ---- Single-dir path ----
+    if dataset_dir is not None:
+        resolved = dataset_dir.expanduser().resolve()
+        if dataset is not None:
+            _bail("--dataset is only valid with --library, not a positional path", EXIT_USAGE)
+        try:
+            result = compact_client.compact(resolved)
+        except FileNotFoundError as e:
+            _bail(str(e), EXIT_NOT_FOUND)
+        except RuntimeError as e:
+            _bail(str(e), EXIT_API)
+        except EolasError as e:
+            _bail(str(e), _exit_for(e))
+        _print_compact_result(result)
+        return
+
+    # ---- Library path ----
+    lib_path = library.expanduser().resolve()
+    if not lib_path.is_dir():
+        _bail(f"library directory does not exist: {lib_path}", EXIT_NOT_FOUND)
+
+    # Discover sub-dirs with a manifest, optionally filtered by --dataset.
+    dirs_to_compact: list[Path] = []
+    for sub in sorted(lib_path.iterdir()):
+        if not sub.is_dir():
+            continue
+        if (sub / MANIFEST_FILENAME).exists():
+            if dataset is None or sub.name == dataset:
+                dirs_to_compact.append(sub)
+
+    if not dirs_to_compact:
+        if dataset:
+            _bail(
+                f"no manifest found for dataset {dataset!r} in {lib_path}",
+                EXIT_NOT_FOUND,
+            )
+        err_console.print(
+            f"[yellow]nothing to compact[/yellow]: no synced datasets found in {lib_path}"
+        )
+        raise typer.Exit(code=EXIT_OK)
+
+    any_error = False
+    for ddir in dirs_to_compact:
+        try:
+            result = compact_client.compact(ddir)
+        except FileNotFoundError as e:
+            err_console.print(f"[red]error[/red] {ddir.name}: {e}")
+            any_error = True
+            continue
+        except RuntimeError as e:
+            err_console.print(f"[red]error[/red] {ddir.name}: {e}")
+            any_error = True
+            continue
+        except EolasError as e:
+            err_console.print(f"[red]error[/red] {ddir.name}: {e}")
+            any_error = True
+            continue
+        _print_compact_result(result)
+
+    if any_error:
+        raise typer.Exit(code=EXIT_GENERIC)
+
+
+def _print_compact_result(result) -> None:
+    """Print a CompactResult in human-readable or machine format."""
+    if not sys.stdout.isatty():
+        sys.stdout.write(json.dumps({
+            "dataset": result.dataset,
+            "files_before": result.files_before,
+            "files_after": result.files_after,
+            "rows_before": result.rows_before,
+            "rows_after": result.rows_after,
+            "bytes_saved": result.bytes_saved,
+        }, default=str))
+        sys.stdout.write("\n")
+        return
+
+    if result.files_before == result.files_after:
+        Console().print(
+            f"[dim]no-op[/dim]      {result.dataset}  "
+            f"[dim](already {result.files_after} file, {result.rows_after:,} rows)[/dim]"
+        )
+    else:
+        saved_str = _format_bytes(max(0, result.bytes_saved))
+        Console().print(
+            f"[green]compacted[/green]  {result.dataset}  "
+            f"[dim]({result.files_before} files → {result.files_after}, "
+            f"{result.rows_after:,} rows, {saved_str} saved)[/dim]"
+        )
 
 
 # ────────────────────────────────────────────────────────────────────────────

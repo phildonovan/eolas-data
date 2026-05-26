@@ -267,3 +267,175 @@ class TestCompactIntegration:
         assert post_manifest is not None
         assert len(post_manifest.snapshots) == 1
         assert post_manifest.snapshots[0].kind == "snapshot"
+
+
+# ---------------------------------------------------------------------------
+# CLI integration tests (shell out to the real CLI binary)
+# ---------------------------------------------------------------------------
+
+class TestCLISyncIntegration:
+    """Smoke tests that exercise the real CLI binary end-to-end."""
+
+    def test_cli_sync_creates_manifest_and_parquet(self, tmpdir_path):
+        """eolas sync doc_huts --library <dir> exits 0 and creates expected files."""
+        import subprocess
+        import sys
+
+        result = subprocess.run(
+            [
+                sys.executable, "-m", "eolas_data.cli",
+                "sync", "doc_huts",
+                "--library", str(tmpdir_path / "cli-lib"),
+                "--api-key", _API_KEY,
+                "--no-progress",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert result.returncode == 0, (
+            f"CLI exited {result.returncode}\nstdout={result.stdout}\nstderr={result.stderr}"
+        )
+
+        cli_lib = tmpdir_path / "cli-lib"
+        dataset_dir = cli_lib / "doc_huts"
+        assert dataset_dir.exists(), "Dataset directory must be created"
+
+        parquet_files = (
+            list(dataset_dir.glob("snapshot-*.parquet"))
+            + list(dataset_dir.glob("snapshot-*.geo.parquet"))
+        )
+        assert parquet_files, "At least one snapshot parquet file must exist"
+
+        manifest_path = dataset_dir / MANIFEST_FILENAME
+        assert manifest_path.exists(), "Manifest must be created"
+
+    def test_cli_sync_second_call_unchanged(self, tmpdir_path):
+        """Second CLI sync call returns 'unchanged' in JSON output."""
+        import subprocess
+        import sys
+        import json
+
+        lib = tmpdir_path / "cli-lib-2"
+
+        # First sync
+        r1 = subprocess.run(
+            [
+                sys.executable, "-m", "eolas_data.cli",
+                "sync", "doc_huts",
+                "--library", str(lib),
+                "--api-key", _API_KEY,
+                "--no-progress",
+            ],
+            capture_output=True, text=True, timeout=120,
+        )
+        assert r1.returncode == 0, f"First sync failed: {r1.stderr}"
+
+        # Second sync (stdout is non-TTY from subprocess → JSON mode)
+        r2 = subprocess.run(
+            [
+                sys.executable, "-m", "eolas_data.cli",
+                "sync", "doc_huts",
+                "--library", str(lib),
+                "--api-key", _API_KEY,
+                "--no-progress",
+            ],
+            capture_output=True, text=True, timeout=120,
+        )
+        assert r2.returncode == 0, f"Second sync failed: {r2.stderr}"
+
+        lines = [l for l in r2.stdout.splitlines() if l.strip()]
+        assert lines, "Expected at least one output line"
+        parsed = json.loads(lines[0])
+        assert parsed["status"] == "unchanged"
+        assert parsed["dataset"] == "doc_huts"
+
+    def test_cli_compact_after_sync_exits_zero(self, tmpdir_path):
+        """eolas compact <dir> after a sync exits 0."""
+        import subprocess
+        import sys
+
+        lib = tmpdir_path / "cli-lib-3"
+
+        # Sync first
+        r_sync = subprocess.run(
+            [
+                sys.executable, "-m", "eolas_data.cli",
+                "sync", "doc_huts",
+                "--library", str(lib),
+                "--api-key", _API_KEY,
+                "--no-progress",
+            ],
+            capture_output=True, text=True, timeout=120,
+        )
+        assert r_sync.returncode == 0, f"Sync failed: {r_sync.stderr}"
+
+        # Compact the dataset directory
+        dataset_dir = lib / "doc_huts"
+        r_compact = subprocess.run(
+            [
+                sys.executable, "-m", "eolas_data.cli",
+                "compact", str(dataset_dir),
+                "--api-key", _API_KEY,
+            ],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert r_compact.returncode == 0, (
+            f"Compact failed: {r_compact.stderr}"
+        )
+
+
+class TestGetLibraryIntegration:
+    """Integration tests for client.get() reading from a synced library."""
+
+    def test_get_reads_from_library_after_sync(self, live_client, tmpdir_path):
+        """After client.sync(), client.get() with EOLAS_LIBRARY set reads from disk."""
+        import os
+
+        lib = tmpdir_path / "lib-get-int"
+
+        # First, sync doc_huts.
+        sync_result = live_client.sync("doc_huts", library_dir=lib)
+        assert sync_result.status in ("snapshot_full", "snapshot_delta", "unchanged")
+
+        # Now read via get() with EOLAS_LIBRARY pointing at the library.
+        old_env = os.environ.get("EOLAS_LIBRARY")
+        try:
+            os.environ["EOLAS_LIBRARY"] = str(lib)
+            # Reset the per-session notification set so the info log fires again
+            from eolas_data import client as client_module
+            client_module._auto_route_notified.discard("doc_huts")
+
+            df = live_client.get("doc_huts")
+            assert len(df) > 0, "Expected rows from synced library"
+            # The read should have come from disk — manifest exists.
+            manifest_path = lib / "doc_huts" / MANIFEST_FILENAME
+            assert manifest_path.exists()
+        finally:
+            if old_env is None:
+                os.environ.pop("EOLAS_LIBRARY", None)
+            else:
+                os.environ["EOLAS_LIBRARY"] = old_env
+
+    def test_get_as_arrow_from_synced_library(self, live_client, tmpdir_path):
+        """client.get('doc_huts', as_arrow=True) returns pyarrow.Table from library."""
+        import os
+        import pyarrow as pa
+
+        lib = tmpdir_path / "lib-get-arrow"
+        live_client.sync("doc_huts", library_dir=lib)
+
+        old_env = os.environ.get("EOLAS_LIBRARY")
+        try:
+            os.environ["EOLAS_LIBRARY"] = str(lib)
+            from eolas_data import client as client_module
+            client_module._auto_route_notified.discard("doc_huts")
+
+            tbl = live_client.get("doc_huts", as_arrow=True)
+            assert isinstance(tbl, pa.Table)
+            assert tbl.num_rows > 0
+        finally:
+            if old_env is None:
+                os.environ.pop("EOLAS_LIBRARY", None)
+            else:
+                os.environ["EOLAS_LIBRARY"] = old_env
