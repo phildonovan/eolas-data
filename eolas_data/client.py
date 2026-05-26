@@ -1402,7 +1402,12 @@ class Client:
           dataset is both bulk-eligible and large (>100k rows) or geospatial.
           OECD and other licence-restricted datasets always fall through to
           live regardless of size.
-        - ``"live"``: always use the live API endpoint, bypassing the cache.
+        - ``"live"``: hit ``/v1/datasets/{name}/data`` directly, bypassing the
+          cache.  Useful for the freshest data, OECD-licence-restricted sources,
+          or small slices of big datasets (e.g. with a ``limit=``, ``start=``,
+          or ``end=`` filter).  **The server returns 413** if you request all
+          rows of a large (>100 k rows) or geometry dataset without a filter —
+          use ``mode="cached"`` (or omit ``mode=``) for whole-dataset pulls.
         - ``"cached"``: always use the cache+sync path (same as calling
           :meth:`get_local`). ``start``, ``end``, ``limit``, and ``format``
           are ignored in this mode; ``as_geo`` is forwarded.
@@ -1435,7 +1440,10 @@ class Client:
                     Cannot be combined with ``as_geo=True`` (raises
                     ``ValueError``).
             mode:   ``"auto"`` (default), ``"live"``, or ``"cached"``. Controls
-                    smart-routing behaviour; see above.
+                    smart-routing behaviour; see above.  ``"live"`` returns 413
+                    from the server when the dataset is large/geo and no filter
+                    is set — pass ``limit=``, ``start=``, or ``end=`` to slice,
+                    or use ``mode="cached"`` for whole-dataset access.
 
         Returns:
             A :class:`Dataset` (pandas DataFrame subclass), a polars DataFrame

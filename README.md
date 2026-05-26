@@ -161,7 +161,9 @@ gdf = client.linz("nz_parcels")   # geopandas.GeoDataFrame in seconds
 df  = client.get("nz_cpi")        # small dataset → stays on live path
 
 # Escape hatches when you need explicit control:
-gdf = client.get("nz_parcels", mode="live")      # force live Iceberg scan
+gdf = client.get("nz_parcels", mode="live")      # force live Iceberg scan (server returns 413
+                                                  # if dataset is large/geo and no filter is set
+                                                  # — apply limit=/start=/end= or use mode="cached")
 gdf = client.get("nz_parcels", mode="cached")    # force cache+sync (= get_local)
 ```
 
