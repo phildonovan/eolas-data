@@ -25,6 +25,9 @@ from .exceptions import (
 from .library import resolve_library_dir
 from .sync.sync import SyncResult as _SyncResult  # noqa: F401 — re-exported below
 from .sync.sync import sync_dataset as _sync_dataset
+from .sync.sync import sync_all as _sync_all
+from .sync.compact import CompactResult as _CompactResult  # noqa: F401
+from .sync.compact import compact_dataset as _compact_dataset
 
 _log = logging.getLogger("eolas_data")
 
@@ -643,6 +646,110 @@ class Client:
             library_dir=resolved_lib,
             progress=progress,
         )
+
+    def sync_all(
+        self,
+        library_dir: Optional[Union[str, "pathlib.Path"]] = None,
+        *,
+        datasets: Optional[list] = None,
+        max_concurrent: int = 4,
+        progress: Optional[bool] = None,
+    ) -> "list[_SyncResult]":
+        """Sync multiple datasets in parallel.
+
+        Syncs all previously-synced datasets in ``library_dir`` (when
+        ``datasets`` is ``None``) or a specific list of dataset names.
+        Up to ``max_concurrent`` syncs run simultaneously via a thread pool.
+
+        Args:
+            library_dir:   Root directory of the local data library.  ``None``
+                           resolves via the library precedence chain.
+            datasets:      List of dataset names to sync.  ``None`` (default)
+                           discovers all sub-directories that contain a
+                           ``_eolas-manifest.json``.
+            max_concurrent: Maximum number of parallel sync operations
+                           (default ``4``).
+            progress:      Tri-state progress bar override passed to each
+                           sync call.
+
+        Returns:
+            A list of :class:`~eolas_data.sync.sync.SyncResult` objects, one
+            per dataset, in the same order as *datasets* (or discovery order
+            when *datasets* is ``None``).  If a single dataset fails its
+            entry has ``status="error"`` and ``error`` set; other datasets
+            complete normally.
+
+        Examples::
+
+            results = client.sync_all(
+                library_dir="/data/nz-warehouse",
+                datasets=["doc_huts", "nz_cpi"],
+            )
+            for r in results:
+                print(r.dataset, r.status)
+
+            # Refresh everything in the library
+            results = client.sync_all(library_dir="/data/nz-warehouse")
+        """
+        if library_dir is None:
+            resolved_lib = resolve_library_dir(interactive=False)
+        else:
+            resolved_lib = pathlib.Path(library_dir).expanduser().resolve()
+
+        return _sync_all(
+            self,
+            library_dir=resolved_lib,
+            datasets=datasets,
+            max_concurrent=max_concurrent,
+            progress=progress,
+        )
+
+    def compact(
+        self,
+        dataset_dir: Union[str, "pathlib.Path"],
+    ) -> "_CompactResult":
+        """Merge all parquet files in a synced dataset directory into a single snapshot.
+
+        After several incremental syncs a dataset directory accumulates one
+        snapshot file plus multiple delta files.  ``compact()`` reads all of
+        them as one logical table via :mod:`pyarrow.dataset`, writes a single
+        merged snapshot file, updates the manifest to point only at the new
+        file, and deletes the old files.
+
+        The operation is **atomic**: if anything fails mid-way, the original
+        manifest and files remain intact.  A recovery scan at the start of each
+        compact run cleans up any ``.compacting-*`` directories left by a
+        previous crash.
+
+        Args:
+            dataset_dir: Path to the dataset directory (e.g.
+                ``"/data/nz-warehouse/doc_huts"``).  Must contain a
+                ``_eolas-manifest.json``.
+
+        Returns:
+            A :class:`~eolas_data.sync.compact.CompactResult` with:
+
+            - ``dataset``: dataset name from the manifest
+            - ``rows_before``: total rows across all files pre-compaction
+            - ``rows_after``: rows in the merged snapshot (equal to
+              ``rows_before`` for append-only data)
+            - ``files_before``: number of parquet files before compaction
+            - ``files_after``: always ``1``
+            - ``bytes_saved``: disk space freed (old total − new file size)
+
+        Raises:
+            FileNotFoundError: If ``dataset_dir`` does not exist or has no
+                manifest.
+            RuntimeError: If ``pyarrow`` is not installed.
+
+        Examples::
+
+            import pathlib
+            cr = client.compact("/data/nz-warehouse/doc_huts")
+            print(cr)
+            # <CompactResult dataset='doc_huts' files=4→1 rows=1429 bytes_saved=...>
+        """
+        return _compact_dataset(pathlib.Path(dataset_dir).expanduser().resolve())
 
     # ------------------------------------------------------------------
     # Streaming helper

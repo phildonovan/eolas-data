@@ -1,4 +1,4 @@
-"""Integration test for client.sync() against the live eolas.fyi API.
+"""Integration test for client.sync() / sync_all() / compact() against the live eolas.fyi API.
 
 Run with:
     pytest tests/test_sync_integration.py -v
@@ -7,8 +7,12 @@ These tests make real HTTPS requests to api.eolas.fyi and write temporary
 files to a system temp directory.  They are marked ``integration`` so they
 can be excluded from fast CI with ``-m "not integration"``.
 
-Dataset: ``doc_huts`` — 1,429 DOC huts, geo (Point), weekly refresh.
-Small enough to be fast; geo so we exercise the geoparquet code path.
+Datasets:
+  - ``doc_huts``           — 1,429 DOC huts, geo (Point), weekly refresh
+  - ``agr_forestry`` — DOC walking tracks, geo (LineString), weekly
+  - ``agr_forestry``             — Stats NZ CPI index series, tabular, quarterly
+
+All are small and safe to re-sync repeatedly.
 """
 from __future__ import annotations
 
@@ -16,10 +20,12 @@ import os
 import pathlib
 import tempfile
 
+import pyarrow.parquet as pq
 import pytest
 
 from eolas_data import Client
 from eolas_data.sync import MANIFEST_FILENAME, read_manifest
+from eolas_data.sync.compact import CompactResult
 from eolas_data.sync.sync import SyncResult
 
 # API key injected via environment (matches the smoke-test pattern).
@@ -107,3 +113,157 @@ class TestSyncIntegrationDocHuts:
             f"Expected ~1,429 DOC huts, got {total_rows}. "
             "Something may be wrong with the row count."
         )
+
+
+# ---------------------------------------------------------------------------
+# sync_all() integration tests
+# ---------------------------------------------------------------------------
+
+class TestSyncAllIntegration:
+    def test_sync_all_explicit_two_datasets(self, live_client, tmpdir_path):
+        """sync_all with ['doc_huts', 'agr_forestry'] → both succeed."""
+        results = live_client.sync_all(
+            library_dir=tmpdir_path,
+            datasets=["doc_huts", "agr_forestry"],
+        )
+
+        assert len(results) == 2
+        for r in results:
+            assert r.status in ("snapshot_full", "snapshot_delta", "unchanged"), \
+                f"Unexpected status for {r.dataset}: {r.status}, error={r.error}"
+            assert r.error is None, f"Unexpected error for {r.dataset}: {r.error}"
+
+    def test_sync_all_ordered_output(self, live_client, tmpdir_path):
+        """Results are in the same order as the input datasets list."""
+        datasets = ["doc_huts", "agr_forestry"]
+        results = live_client.sync_all(library_dir=tmpdir_path, datasets=datasets)
+
+        assert [r.dataset for r in results] == datasets
+
+    def test_sync_all_discovers_from_library_dir(self, live_client, tmpdir_path):
+        """After syncing manually, sync_all(datasets=None) rediscovers them."""
+        # Ensure at least one dataset is in the library
+        live_client.sync("doc_huts", library_dir=tmpdir_path)
+
+        results = live_client.sync_all(library_dir=tmpdir_path)
+
+        assert len(results) >= 1
+        ds_names = {r.dataset for r in results}
+        assert "doc_huts" in ds_names
+
+    def test_sync_all_second_call_unchanged(self, live_client, tmpdir_path):
+        """Second sync_all on same datasets → all 'unchanged' (snapshot not yet refreshed)."""
+        datasets = ["doc_huts", "agr_forestry"]
+        # First call
+        live_client.sync_all(library_dir=tmpdir_path, datasets=datasets)
+        # Second call — snapshots haven't changed in the same test session
+        results = live_client.sync_all(library_dir=tmpdir_path, datasets=datasets)
+
+        for r in results:
+            assert r.status == "unchanged", \
+                f"{r.dataset} expected 'unchanged', got '{r.status}'"
+
+
+# ---------------------------------------------------------------------------
+# compact() integration tests
+# ---------------------------------------------------------------------------
+
+class TestCompactIntegration:
+    def test_compact_after_single_sync_is_noop(self, live_client, tmpdir_path):
+        """compact() after a single sync (one snapshot, no deltas) is a no-op."""
+        live_client.sync("doc_huts", library_dir=tmpdir_path)
+
+        dataset_dir = tmpdir_path / "doc_huts"
+        result = live_client.compact(dataset_dir)
+
+        assert isinstance(result, CompactResult)
+        assert result.files_before == 1
+        assert result.files_after == 1
+        assert result.rows_before == result.rows_after
+        assert result.bytes_saved == 0
+
+    def test_compact_with_injected_delta_files(self, live_client, tmpdir_path):
+        """Inject extra parquet files and verify compact merges them to 1."""
+        import pyarrow as pa
+
+        live_client.sync("doc_huts", library_dir=tmpdir_path)
+        dataset_dir = tmpdir_path / "doc_huts"
+
+        # Read manifest to get current snapshot id
+        manifest = read_manifest(dataset_dir / MANIFEST_FILENAME)
+        assert manifest is not None
+        base_id = manifest.current_snapshot
+
+        # Inject two synthetic delta files (minimal valid parquet)
+        from eolas_data.sync.manifest import ManifestEntry, write_manifest
+        for i, (delta_name, new_id) in enumerate([
+            ("delta-2026-05-24-to-2026-05-25.parquet", base_id + 1001),
+            ("delta-2026-05-25-to-2026-05-26.parquet", base_id + 2002),
+        ]):
+            tbl = pa.table({"id": [i * 10], "value": [float(i)]})
+            pq.write_table(tbl, dataset_dir / delta_name)
+            entry = ManifestEntry(
+                snapshot_id=new_id,
+                kind="delta",
+                parent_snapshot=base_id if i == 0 else base_id + 1001,
+                file=delta_name,
+                synced_at="2026-05-27T10:00:00Z",
+                rows_added=1,
+            )
+            manifest.snapshots.append(entry)
+            manifest.current_snapshot = new_id
+            base_id = new_id
+        write_manifest(manifest, dataset_dir / MANIFEST_FILENAME)
+
+        # Now compact
+        result = live_client.compact(dataset_dir)
+
+        assert result.files_before == 3   # 1 snapshot + 2 injected deltas
+        assert result.files_after == 1
+        # Merged file should be readable via pyarrow.
+        # Use a set to deduplicate: snapshot-*.geo.parquet matches both
+        # "snapshot-*.parquet" and "snapshot-*.geo.parquet" globs.
+        merged_files = list({
+            f for f in dataset_dir.iterdir()
+            if f.is_file()
+            and f.name.startswith("snapshot-")
+            and (f.name.endswith(".parquet") or f.name.endswith(".geo.parquet"))
+        })
+        assert len(merged_files) == 1
+        merged_table = pq.read_table(merged_files[0])
+        assert merged_table.num_rows == result.rows_after
+
+    def test_compact_manifest_single_entry_after_merge(self, live_client, tmpdir_path):
+        """After compact, manifest has exactly 1 snapshot entry."""
+        import pyarrow as pa
+
+        live_client.sync("doc_huts", library_dir=tmpdir_path)
+        dataset_dir = tmpdir_path / "doc_huts"
+
+        manifest = read_manifest(dataset_dir / MANIFEST_FILENAME)
+        assert manifest is not None
+        base_id = manifest.current_snapshot
+
+        from eolas_data.sync.manifest import ManifestEntry, write_manifest
+        delta_name = "delta-2026-05-24-to-2026-05-27.parquet"
+        new_id = base_id + 999
+        tbl = pa.table({"id": [99], "value": [99.0]})
+        pq.write_table(tbl, dataset_dir / delta_name)
+        entry = ManifestEntry(
+            snapshot_id=new_id,
+            kind="delta",
+            parent_snapshot=base_id,
+            file=delta_name,
+            synced_at="2026-05-27T10:00:00Z",
+            rows_added=1,
+        )
+        manifest.snapshots.append(entry)
+        manifest.current_snapshot = new_id
+        write_manifest(manifest, dataset_dir / MANIFEST_FILENAME)
+
+        live_client.compact(dataset_dir)
+
+        post_manifest = read_manifest(dataset_dir / MANIFEST_FILENAME)
+        assert post_manifest is not None
+        assert len(post_manifest.snapshots) == 1
+        assert post_manifest.snapshots[0].kind == "snapshot"

@@ -2,7 +2,7 @@
 
 Public symbols re-exported here for convenience:
 
-    from eolas_data.sync import SyncResult, read_manifest, write_manifest
+    from eolas_data.sync import SyncResult, CompactResult, read_manifest, write_manifest
 """
 from .manifest import (
     MANIFEST_FILENAME,
@@ -12,7 +12,8 @@ from .manifest import (
     read_manifest,
     write_manifest,
 )
-from .sync import SyncResult, sync_dataset
+from .sync import SyncResult, sync_dataset, sync_all
+from .compact import CompactResult, compact_dataset
 
 __all__ = [
     "MANIFEST_FILENAME",
@@ -23,4 +24,7 @@ __all__ = [
     "write_manifest",
     "SyncResult",
     "sync_dataset",
+    "sync_all",
+    "CompactResult",
+    "compact_dataset",
 ]

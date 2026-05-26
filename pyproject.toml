@@ -48,3 +48,8 @@ eolas = "eolas_data.cli:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["eolas_data"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: marks tests as requiring live API access (deselected by default)",
+]

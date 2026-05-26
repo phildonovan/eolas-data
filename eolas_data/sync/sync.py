@@ -62,8 +62,9 @@ import datetime
 import logging
 import os
 import pathlib
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional, Union
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, List, Optional, Union
 
 from .manifest import (
     MANIFEST_FILENAME,
@@ -99,6 +100,10 @@ class SyncResult:
             ``"unchanged"`` — the server snapshot id matches the local
             manifest; no I/O was performed on the data files.
 
+            ``"error"`` — an exception was raised while syncing this dataset
+            (only set by :func:`sync_all` when it catches a per-dataset
+            failure; ``error`` carries the exception string repr).
+
         dataset:
             The dataset name passed to ``sync()``.
 
@@ -107,7 +112,7 @@ class SyncResult:
 
         bytes_downloaded:
             Total bytes written to disk in this call.  ``0`` for
-            ``"unchanged"``.
+            ``"unchanged"`` and ``"error"``.
 
         rows_added:
             Number of new rows brought in.
@@ -117,10 +122,15 @@ class SyncResult:
               counted from the parquet metadata).
             - For ``"snapshot_delta"``: rows in the delta file (from the
               ``X-Eolas-Row-Count`` response header, or counted if absent).
-            - For ``"unchanged"``: ``0``.
+            - For ``"unchanged"`` or ``"error"``: ``0``.
 
         files_added:
-            Number of new parquet files written.  ``0`` for ``"unchanged"``.
+            Number of new parquet files written.  ``0`` for ``"unchanged"``
+            and ``"error"``.
+
+        error:
+            ``None`` for normal statuses.  When ``status="error"`` this holds
+            the string representation of the exception that was raised.
     """
 
     status: str
@@ -129,8 +139,14 @@ class SyncResult:
     bytes_downloaded: int
     rows_added: int
     files_added: int
+    error: Optional[str] = field(default=None, compare=False)
 
     def __repr__(self) -> str:
+        if self.error:
+            return (
+                f"<SyncResult dataset={self.dataset!r} status={self.status!r} "
+                f"error={self.error!r}>"
+            )
         return (
             f"<SyncResult dataset={self.dataset!r} status={self.status!r} "
             f"rows_added={self.rows_added} bytes_downloaded={self.bytes_downloaded}>"
@@ -589,3 +605,94 @@ def _date_from_header(resp, snapshot_id: Optional[int]) -> Optional[str]:
     Keeping the filename deterministic (by snapshot id or today) is the goal.
     """
     return _today_str()
+
+
+# ---------------------------------------------------------------------------
+# sync_all
+# ---------------------------------------------------------------------------
+
+def sync_all(
+    client: "Client",
+    library_dir: Union[str, pathlib.Path],
+    *,
+    datasets: Optional[List[str]] = None,
+    max_concurrent: int = 4,
+    progress: Optional[bool] = None,
+) -> List[SyncResult]:
+    """Implement ``client.sync_all(library_dir, datasets=..., max_concurrent=...)``.
+
+    Parameters
+    ----------
+    client:
+        The :class:`~eolas_data.Client` instance.
+    library_dir:
+        Root directory of the local data library.
+    datasets:
+        List of dataset names to sync.  If ``None``, all sub-directories
+        that contain a ``_eolas-manifest.json`` are synced.
+    max_concurrent:
+        Maximum number of parallel sync operations.  Each
+        :func:`sync_dataset` call is mostly I/O-bound (HTTP wait dominates),
+        so a thread pool is used rather than asyncio.
+    progress:
+        Tri-state progress bar override passed through to each
+        :func:`sync_dataset` call.
+
+    Returns
+    -------
+    list[SyncResult]
+        One :class:`SyncResult` per dataset, in the same order as *datasets*
+        (or discovery order when *datasets* is ``None``).  On a per-dataset
+        failure the corresponding entry has ``status="error"`` and ``error``
+        set to the string repr of the exception; other datasets still
+        complete normally.
+    """
+    lib = pathlib.Path(library_dir).expanduser().resolve()
+
+    # ------------------------------------------------------------------
+    # Determine the dataset list
+    # ------------------------------------------------------------------
+    if datasets is None:
+        # Discover all sub-directories that have a manifest.
+        names: List[str] = []
+        if lib.is_dir():
+            for sub in sorted(lib.iterdir()):
+                if sub.is_dir() and (sub / MANIFEST_FILENAME).exists():
+                    names.append(sub.name)
+        if not names:
+            return []
+    else:
+        names = list(datasets)
+
+    total = len(names)
+
+    # ------------------------------------------------------------------
+    # Run up to max_concurrent syncs in parallel via a thread pool.
+    # Each sync is mostly I/O-bound (HTTP), so threads beat asyncio here.
+    # ------------------------------------------------------------------
+    # Map future → (index, name) so we can preserve order in the output.
+    results: List[Optional[SyncResult]] = [None] * total
+
+    def _sync_one(idx: int, name: str) -> tuple[int, SyncResult]:
+        try:
+            result = sync_dataset(client, name, library_dir=lib, progress=progress)
+        except Exception as exc:
+            result = SyncResult(
+                status="error",
+                dataset=name,
+                library_dir=lib,
+                bytes_downloaded=0,
+                rows_added=0,
+                files_added=0,
+                error=repr(exc),
+            )
+        _log.info("[%d/%d] %s: %s", idx + 1, total, name, result.status)
+        return idx, result
+
+    with ThreadPoolExecutor(max_workers=min(max_concurrent, total)) as pool:
+        futures = {pool.submit(_sync_one, i, n): i for i, n in enumerate(names)}
+        for future in as_completed(futures):
+            idx, result = future.result()
+            results[idx] = result
+
+    return results  # type: ignore[return-value]  # all slots filled

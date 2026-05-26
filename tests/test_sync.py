@@ -630,3 +630,187 @@ class TestSyncAtomicWrite:
         assert new_manifest_text == old_manifest_text, (
             "Manifest must not be updated when the delta write fails"
         )
+
+
+# ---------------------------------------------------------------------------
+# sync_all() tests
+# ---------------------------------------------------------------------------
+
+# Additional metadata fixture for a second dataset (non-geo, no incremental)
+META_NZ_CPI = {
+    "name": "nz_cpi",
+    "title": "NZ CPI",
+    "source": "Stats NZ",
+    "namespace": "statsnz",
+    "table": "nz_cpi",
+    "current_snapshot_id": SNAPSHOT_V1,
+    "incremental_supported": False,
+    "refresh_cadence": "quarterly",
+    "geometry_type": None,
+    "has_geometry": False,
+}
+
+META_NZ_CPI_V2 = {**META_NZ_CPI, "current_snapshot_id": SNAPSHOT_V2}
+
+
+class TestSyncAll:
+    @resp_lib.activate
+    def test_sync_all_explicit_datasets_returns_ordered_results(self, client, tmp_path):
+        """sync_all with explicit list → results in same order as input."""
+        # Register mock responses for both datasets
+        resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/doc_huts",
+                     json=META_DOC_HUTS, status=200)
+        resp_lib.add(resp_lib.GET, f"{BASE}/v1/bulk/doc/doc_huts",
+                     body=FAKE_PARQUET,
+                     content_type="application/octet-stream",
+                     status=200)
+        resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi",
+                     json=META_NZ_CPI, status=200)
+        resp_lib.add(resp_lib.GET, f"{BASE}/v1/bulk/statsnz/nz_cpi",
+                     body=FAKE_PARQUET_V2,
+                     content_type="application/octet-stream",
+                     status=200)
+
+        results = client.sync_all(
+            library_dir=tmp_path,
+            datasets=["doc_huts", "nz_cpi"],
+        )
+
+        assert len(results) == 2
+        assert results[0].dataset == "doc_huts"
+        assert results[1].dataset == "nz_cpi"
+
+    @resp_lib.activate
+    def test_sync_all_explicit_datasets_all_succeed(self, client, tmp_path):
+        """sync_all with explicit list → all results have non-error status."""
+        resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/doc_huts",
+                     json=META_DOC_HUTS, status=200)
+        resp_lib.add(resp_lib.GET, f"{BASE}/v1/bulk/doc/doc_huts",
+                     body=FAKE_PARQUET,
+                     content_type="application/octet-stream",
+                     status=200)
+        resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi",
+                     json=META_NZ_CPI, status=200)
+        resp_lib.add(resp_lib.GET, f"{BASE}/v1/bulk/statsnz/nz_cpi",
+                     body=FAKE_PARQUET_V2,
+                     content_type="application/octet-stream",
+                     status=200)
+
+        results = client.sync_all(
+            library_dir=tmp_path,
+            datasets=["doc_huts", "nz_cpi"],
+        )
+
+        for r in results:
+            assert r.status != "error", f"Expected no errors, got: {r}"
+
+    @resp_lib.activate
+    def test_sync_all_discovers_manifests_when_datasets_none(self, client, tmp_path):
+        """sync_all(datasets=None) discovers all sub-dirs with manifests."""
+        # Pre-populate two dataset dirs with manifests
+        for ds_name, meta in [("doc_huts", META_DOC_HUTS), ("nz_cpi", META_NZ_CPI)]:
+            ddir = tmp_path / ds_name
+            ddir.mkdir()
+            _write_manifest_for(ddir, SNAPSHOT_V1)
+
+        # Both datasets are already at SNAPSHOT_V1 on the server → unchanged
+        resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/doc_huts",
+                     json=META_DOC_HUTS, status=200)
+        resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi",
+                     json=META_NZ_CPI, status=200)
+
+        results = client.sync_all(library_dir=tmp_path)
+
+        assert len(results) == 2
+        dataset_names = {r.dataset for r in results}
+        assert "doc_huts" in dataset_names
+        assert "nz_cpi" in dataset_names
+
+    def test_sync_all_empty_library_dir_returns_empty_list(self, client, tmp_path):
+        """sync_all on a library with no manifests (datasets=None) → empty list."""
+        results = client.sync_all(library_dir=tmp_path)
+        assert results == []
+
+    @resp_lib.activate
+    def test_sync_all_one_failure_does_not_kill_batch(self, client, tmp_path):
+        """One failing dataset must not prevent the others from completing."""
+        # doc_huts will succeed
+        resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/doc_huts",
+                     json=META_DOC_HUTS, status=200)
+        resp_lib.add(resp_lib.GET, f"{BASE}/v1/bulk/doc/doc_huts",
+                     body=FAKE_PARQUET,
+                     content_type="application/octet-stream",
+                     status=200)
+        # nz_cpi will return 500 → exception
+        resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi",
+                     json={"detail": "internal server error"},
+                     status=500)
+
+        results = client.sync_all(
+            library_dir=tmp_path,
+            datasets=["doc_huts", "nz_cpi"],
+        )
+
+        assert len(results) == 2
+        # doc_huts should succeed
+        doc_result = next(r for r in results if r.dataset == "doc_huts")
+        assert doc_result.status == "snapshot_full"
+
+        # nz_cpi should be error, not raise
+        cpi_result = next(r for r in results if r.dataset == "nz_cpi")
+        assert cpi_result.status == "error"
+        assert cpi_result.error is not None
+        assert len(cpi_result.error) > 0
+
+    @resp_lib.activate
+    def test_sync_all_error_result_has_error_field(self, client, tmp_path):
+        """A failed dataset must produce SyncResult with status='error' and error string."""
+        resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/doc_huts",
+                     json={"detail": "not found"},
+                     status=404)
+
+        results = client.sync_all(library_dir=tmp_path, datasets=["doc_huts"])
+
+        assert len(results) == 1
+        r = results[0]
+        assert r.status == "error"
+        assert r.error is not None
+        assert r.bytes_downloaded == 0
+        assert r.rows_added == 0
+        assert r.files_added == 0
+
+    @resp_lib.activate
+    def test_sync_all_concurrency_limit_respected(self, client, tmp_path):
+        """max_concurrent=2 with 4 datasets should complete without error."""
+        datasets = ["doc_huts", "doc_huts", "doc_huts", "doc_huts"]
+        # Register enough responses for 4 calls
+        for _ in range(4):
+            resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/doc_huts",
+                         json=META_DOC_HUTS, status=200)
+            resp_lib.add(resp_lib.GET, f"{BASE}/v1/bulk/doc/doc_huts",
+                         body=FAKE_PARQUET,
+                         content_type="application/octet-stream",
+                         status=200)
+
+        results = client.sync_all(
+            library_dir=tmp_path,
+            datasets=datasets,
+            max_concurrent=2,
+        )
+
+        assert len(results) == 4
+        # All should succeed (no errors despite concurrency limit)
+        assert all(r.status != "error" for r in results)
+
+    def test_sync_result_error_field_default_none(self):
+        """SyncResult must have error=None by default (backward compat)."""
+        from eolas_data.sync.sync import SyncResult
+        r = SyncResult(
+            status="unchanged",
+            dataset="test",
+            library_dir=pathlib.Path("/tmp"),
+            bytes_downloaded=0,
+            rows_added=0,
+            files_added=0,
+        )
+        assert r.error is None
