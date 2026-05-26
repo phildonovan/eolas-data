@@ -76,6 +76,45 @@ _FILE_RE = re.compile(
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _coerce_snapshot_id(raw) -> int:
+    """Coerce a snapshot id to ``int`` from any JSON-decoded type.
+
+    Python manifests write snapshot ids as JSON integers (preserved exactly).
+    R manifests written by ``jsonlite`` write large integers as IEEE-754
+    doubles (scientific notation), which lose the last ~8 bits of precision
+    for Iceberg snapshot ids (64-bit integers > 2^53).
+
+    This function accepts:
+    - ``int``: returned unchanged.
+    - ``float``: rounded to nearest int (R-written manifests).  If the float
+      is not a whole number ``ValueError`` is raised — that would be a
+      corrupted snapshot id.
+    - ``str``: parsed as int (forward-compatible with a future schema version
+      that writes snapshot ids as strings for full precision).
+
+    Raises ``TypeError`` / ``ValueError`` on any other type or on a float
+    with a fractional part.
+    """
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float):
+        if raw != int(raw):
+            raise ValueError(
+                f"Snapshot id {raw!r} is a non-integer float; "
+                "expected a whole-number value."
+            )
+        return int(raw)
+    if isinstance(raw, str):
+        return int(raw)
+    raise TypeError(
+        f"Snapshot id must be int, float (whole), or str, got {type(raw).__name__!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
 
@@ -155,12 +194,12 @@ class ManifestEntry:
     @classmethod
     def from_dict(cls, d: dict) -> "ManifestEntry":
         return cls(
-            snapshot_id=d["snapshot_id"],
+            snapshot_id=_coerce_snapshot_id(d["snapshot_id"]),
             kind=d["kind"],
             file=d["file"],
             synced_at=d["synced_at"],
             rows=d.get("rows"),
-            parent_snapshot=d.get("parent_snapshot"),
+            parent_snapshot=_coerce_snapshot_id(d["parent_snapshot"]) if d.get("parent_snapshot") is not None else None,
             rows_added=d.get("rows_added"),
         )
 
@@ -218,10 +257,11 @@ class Manifest:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Manifest":
+        raw_current = d.get("current_snapshot")
         return cls(
             dataset=d["dataset"],
             snapshots=[ManifestEntry.from_dict(e) for e in d.get("snapshots", [])],
-            current_snapshot=d.get("current_snapshot"),
+            current_snapshot=_coerce_snapshot_id(raw_current) if raw_current is not None else None,
             format=d.get("format", "parquet"),
             schema_version=d.get("schema_version", MANIFEST_SCHEMA_VERSION),
         )

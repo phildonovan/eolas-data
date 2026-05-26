@@ -669,6 +669,10 @@ def sync_cmd(
                                          progress=False if no_progress else None)
             except EolasError as e:
                 _bail(str(e), _exit_for(e))
+            except (PermissionError, OSError) as e:
+                # str(e) can contain a newline (the path is on its own line in
+                # Python's default PermissionError repr) — normalise to one line.
+                _bail(f"cannot write to library directory: {str(e).replace(chr(10), ' ')}", EXIT_GENERIC)
             _print_sync_result(result)
             if result.status == "error":
                 raise typer.Exit(code=EXIT_GENERIC)
@@ -692,6 +696,8 @@ def sync_cmd(
             )
         except EolasError as e:
             _bail(str(e), _exit_for(e))
+        except (PermissionError, OSError) as e:
+            _bail(f"cannot write to library directory: {e}", EXIT_GENERIC)
 
         if not results:
             if all_datasets:
@@ -997,9 +1003,10 @@ def _print_compact_result(result) -> None:
         return
 
     if result.files_before == result.files_after:
+        file_word = "file" if result.files_after == 1 else "files"
         Console().print(
             f"[dim]no-op[/dim]      {result.dataset}  "
-            f"[dim](already {result.files_after} file, {result.rows_after:,} rows)[/dim]"
+            f"[dim](already {result.files_after} {file_word}, {result.rows_after:,} rows)[/dim]"
         )
     else:
         saved_str = _format_bytes(max(0, result.bytes_saved))
