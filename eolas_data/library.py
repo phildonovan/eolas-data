@@ -23,6 +23,19 @@ import pathlib
 import sys
 from typing import Optional
 
+from rich.console import Console
+from rich.prompt import Prompt
+from rich.theme import Theme
+
+# Single shared console — writes to stderr so library status doesn't pollute
+# stdout (where JSON/data output goes from CLI commands). Custom theme styles
+# (`path`, `key`) are used for inline emphasis without leaking ansi codes
+# to non-tty consumers.
+_console = Console(
+    stderr=True,
+    theme=Theme({"path": "cyan", "key": "bold yellow"}),
+)
+
 _log = logging.getLogger("eolas_data")
 
 # Per-session flag: have we already prompted (or decided not to)?
@@ -202,32 +215,39 @@ def _maybe_prompt() -> Optional[str]:
     opt1 = str(home / "eolas-library")
     opt2 = str(pathlib.Path(".").resolve() / "eolas-library")
 
-    print(
-        "\neolas-data: No library configured.\n"
-        "\nThis dataset would be cached at: ~/.cache/eolas/  (transient OS cache —\n"
-        "fine for one-off use, but cleared if your OS hits cache pressure).\n"
-        "\nFor reproducible pipelines, set up a library:\n"
-        f"  1) ~/eolas-library       (user-wide, persistent — recommended)\n"
-        f"  2) ./eolas-library       (this project)\n"
-        "  3) Custom path\n"
-        "  4) Stay with ~/.cache/eolas (don't ask again — sets library_dir to it)\n"
+    _console.print()
+    _console.print("[bold]eolas-data:[/bold] No library configured.")
+    _console.print()
+    _console.print(
+        "This dataset would be cached at [path]~/.cache/eolas/[/path] "
+        "(transient OS cache — fine for one-off use, but cleared if your "
+        "OS hits cache pressure).",
+        style="dim",
+        highlight=False,
     )
+    _console.print()
+    _console.print("For reproducible pipelines, set up a library:")
+    _console.print(f"  [green]1[/green]) [path]~/eolas-library[/path]      user-wide, persistent [dim](recommended)[/dim]")
+    _console.print(f"  [green]2[/green]) [path]./eolas-library[/path]      this project")
+    _console.print( "  [green]3[/green]) Custom path")
+    _console.print( "  [green]4[/green]) Stay with [path]~/.cache/eolas[/path] [dim](don't ask again)[/dim]")
+    _console.print()
 
     try:
-        raw = input("Choice [1]: ").strip()
+        raw = Prompt.ask("Choice", choices=["1", "2", "3", "4"], default="1", console=_console)
     except (EOFError, KeyboardInterrupt):
-        print()
+        _console.print()
         return None
 
-    if raw == "" or raw == "1":
+    if raw == "1":
         chosen = opt1
     elif raw == "2":
         chosen = opt2
     elif raw == "3":
         try:
-            custom = input("Enter path: ").strip()
+            custom = Prompt.ask("Enter path", console=_console).strip()
         except (EOFError, KeyboardInterrupt):
-            print()
+            _console.print()
             return None
         if not custom:
             # Fallback silently
@@ -242,5 +262,8 @@ def _maybe_prompt() -> Optional[str]:
 
     resolved = str(pathlib.Path(chosen).expanduser().resolve())
     _write_config_key("library_dir", resolved)
-    print(f"eolas-data: library set to {resolved} (saved to {_CONFIG_FILE})\n")
+    _console.print(
+        f"[green]✓[/green] library set to [path]{resolved}[/path] "
+        f"[dim](saved to {_CONFIG_FILE})[/dim]"
+    )
     return resolved
