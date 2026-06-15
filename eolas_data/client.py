@@ -69,6 +69,24 @@ def _keyring_get() -> str:
         return ""
 
 
+_CONFIG_FILE = pathlib.Path.home() / ".eolas" / "config.json"
+
+
+def _config_file_get() -> str:
+    """Return the ``api_key`` from ``~/.eolas/config.json``, or ``""``.
+
+    Mirrors the CLI's ``_load_api_key`` so a key saved with ``eolas auth
+    set-key`` is picked up by a bare ``Client()`` in a notebook. Never raises —
+    a missing/corrupt file is treated as "not found".
+    """
+    try:
+        if _CONFIG_FILE.exists():
+            return json.loads(_CONFIG_FILE.read_text()).get("api_key", "") or ""
+    except (json.JSONDecodeError, OSError):
+        return ""
+    return ""
+
+
 @dataclass
 class SyncResult:
     """Result of a :meth:`Client.sync_bulk` call.
@@ -125,7 +143,9 @@ class Client:
     """Client for the eolas.fyi statistical data API.
 
     Args:
-        api_key:  Your API key. Falls back to the ``EOLAS_API_KEY`` env var.
+        api_key:  Your API key. Falls back, in order, to the ``EOLAS_API_KEY``
+                  env var, the OS keyring, then ``~/.eolas/config.json`` (as
+                  written by ``eolas auth set-key``).
         base_url: Override the API base URL (useful for testing).
         cache:    Cache responses in memory for the lifetime of the client.
                   Useful in notebooks to avoid re-fetching on re-runs.
@@ -153,11 +173,14 @@ class Client:
         base_url: str = BASE_URL,
         cache: bool = False,
     ):
-        # Precedence: explicit arg → EOLAS_API_KEY env var → OS keyring → ""
+        # Precedence: explicit arg → EOLAS_API_KEY env var → OS keyring →
+        # ~/.eolas/config.json → "". The config-file step mirrors the CLI's
+        # `_load_api_key` so `eolas auth set-key` carries into `Client()`.
         self._key = (
             api_key
             or os.getenv("EOLAS_API_KEY")
             or _keyring_get()
+            or _config_file_get()
             or ""
         )
         self._base  = base_url.rstrip("/")
@@ -1982,7 +2005,11 @@ class Client:
         if resp.status_code == 200:
             return
         if resp.status_code == 401:
-            raise AuthenticationError("Invalid or missing API key.")
+            raise AuthenticationError(
+                "Invalid or missing API key. Set the EOLAS_API_KEY environment "
+                "variable, or run `eolas auth set-key`. "
+                "Get a free key at https://eolas.fyi/signup"
+            )
         if resp.status_code == 403:
             try:
                 detail = resp.json().get("detail", "API key is inactive.")
@@ -1990,9 +2017,26 @@ class Client:
                 detail = "API key is inactive."
             raise AuthenticationError(detail)
         if resp.status_code == 429:
-            raise RateLimitError(
-                "Monthly request limit reached. Upgrade for higher limits."
-            )
+            h = resp.headers
+            limit  = h.get("X-RateLimit-Limit")
+            retry  = h.get("Retry-After")
+            reset  = h.get("X-RateLimit-Reset")
+            # A 429 carrying our X-RateLimit-* headers came from the API; a 429
+            # with only a cf-ray was thrown at the Cloudflare edge before origin.
+            via_cf = bool(h.get("cf-ray")) and limit is None
+            parts = ["Rate limit reached."]
+            if limit:
+                parts.append(f"Plan limit: {limit} requests.")
+            if retry:
+                parts.append(f"Retry after {retry}s.")
+            elif reset:
+                parts.append(f"Resets at {reset}.")
+            if via_cf:
+                parts.append(
+                    f"(Blocked at the Cloudflare edge — cf-ray {h.get('cf-ray')}.)"
+                )
+            parts.append("Upgrade for higher limits: https://eolas.fyi/pricing")
+            raise RateLimitError(" ".join(parts))
         if resp.status_code == 404:
             try:
                 detail = resp.json().get("detail", "Not found.")

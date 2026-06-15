@@ -16,6 +16,10 @@ dependencies = [
     "pyarrow>=14",
     "tqdm>=4.60",
     "rich>=13",
+    # typer powers the `eolas` console script, which is always registered in
+    # [project.scripts] — so it must be a base dep, not a [cli] extra, or a
+    # bare `pip install eolas-data` leaves a broken `eolas` command.
+    "typer>=0.12",
 ]
 keywords = ["statistics", "economics", "api", "new-zealand", "australia", "eolas"]
 classifiers = [
