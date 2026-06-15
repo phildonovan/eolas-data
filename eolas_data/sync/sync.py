@@ -306,7 +306,9 @@ def sync_dataset(
     except (TypeError, ValueError):
         current_snapshot_id = None
 
-    incremental_supported: bool = bool(meta.get("incremental_supported", True))
+    # Fail-safe default False (matches server catalog default): incremental is opt-in.
+    # If metadata omits the field, do NOT attempt a delta — fall back to full bulk.
+    incremental_supported: bool = bool(meta.get("incremental_supported", False))
 
     # Determine format from metadata.
     gt  = meta.get("geometry_type")
