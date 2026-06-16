@@ -56,3 +56,39 @@ class BulkNotYetAvailable(APIError):
         "on-demand current snapshots — see https://eolas.fyi/pricing."
     )):
         super().__init__(503, message)
+
+
+# ---------------------------------------------------------------------------
+# CDC / changelog-specific exceptions
+# ---------------------------------------------------------------------------
+
+class ChangesUpgradeRequired(APIError):
+    """Raised on HTTP 402 from /changes: changelog sync requires Pro or higher."""
+
+    def __init__(self, message: str = (
+        "Changelog sync is a Pro feature. "
+        "Upgrade at https://eolas.fyi/pricing or use sync_bulk() instead."
+    )):
+        super().__init__(402, message)
+
+
+class ChangesLicenceRestricted(APIError):
+    """Raised on HTTP 403 from /changes: dataset licence prohibits bulk/changelog export."""
+
+    def __init__(self, message: str):
+        super().__init__(403, message)
+
+
+class WatermarkExpired(APIError):
+    """Raised on HTTP 410 from /changes: since_seq predates the retained changelog range.
+
+    The caller must re-baseline with sync_bulk() and reset the watermark before
+    resuming changelog sync.
+
+    Attributes:
+        min_available_seq: The lowest seq the server still retains.
+    """
+
+    def __init__(self, message: str, min_available_seq: int = 0):
+        self.min_available_seq = min_available_seq
+        super().__init__(410, message)
