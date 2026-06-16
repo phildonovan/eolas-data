@@ -1,6 +1,6 @@
 """Library directory resolution for eolas-data.
 
-Implements the precedence chain for where ``get_local()`` / ``sync_bulk()``
+Implements the precedence chain for where ``sync_bulk()`` / ``download_bulk()``
 cache data files on disk:
 
   1. Explicit ``cache_dir=`` arg passed to the method   (handled by callers)
@@ -57,7 +57,7 @@ def resolve_library_dir(*, interactive: bool = True) -> pathlib.Path:
     """Return the resolved library directory, following the precedence chain.
 
     The result is always an absolute, ``~``-expanded path.  The directory is
-    **not** created here — callers (``get_local``, ``_get_local_impl``) do
+    **not** created here — callers (``sync_bulk``, ``download_bulk``) do
     that themselves immediately before writing.
 
     Args:

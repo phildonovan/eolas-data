@@ -1152,7 +1152,7 @@ def library_set_cmd(
     """Set the library directory where eolas data files are cached.
 
     The path is written to ~/.eolas/config.json as 'library_dir' and used
-    by get_local() and the smart-routing path in get() on all future calls.
+    by sync_bulk() / download_bulk() to cache data files on all future calls.
     This takes precedence over the ~/.cache/eolas/ fallback and is also read
     by the R eolas client (same config file).
 
@@ -1212,8 +1212,8 @@ def library_status_cmd() -> None:
 def library_clear_cmd() -> None:
     """Remove library_dir from ~/.eolas/config.json.
 
-    After clearing, get_local() falls back to ~/.cache/eolas/ (or the
-    EOLAS_LIBRARY env var if set).
+    After clearing, sync_bulk()/download_bulk() fall back to ~/.cache/eolas/
+    (or the EOLAS_LIBRARY env var if set).
     """
     try:
         library_clear()

@@ -13,6 +13,7 @@ import pandas as pd
 import requests
 
 from .dataset import Dataset
+from .library import resolve_library_dir
 from .exceptions import (
     APIError,
     AuthenticationError,
@@ -1163,6 +1164,132 @@ class Client:
         except (AttributeError, TypeError):
             pass
         return result
+
+    # ------------------------------------------------------------------
+    # Bulk-cache convenience read (mirrors R eolas_get_local)
+    # ------------------------------------------------------------------
+
+    def get_local(
+        self,
+        name: Union[str, "DatasetName"],
+        *,
+        cache_dir: Optional[Union[str, "pathlib.Path"]] = None,
+        format: Optional[str] = None,
+        freshness: str = "auto",
+        as_geo: Optional[bool] = None,
+        as_arrow: bool = False,
+        progress: Optional[bool] = None,
+    ) -> "pd.DataFrame":
+        """Download (or serve from cache) a whole dataset as a local DataFrame.
+
+        The recommended path for large or geospatial datasets in a notebook
+        workflow, and the Python mirror of R's ``eolas_get_local()``. On the
+        first call it fetches the bulk file from CDN (milliseconds for monthly
+        snapshots) and writes it to the configured library directory (see
+        :func:`eolas_data.library.resolve_library_dir`). On subsequent calls a
+        lightweight HEAD request checks whether the file is still current; if so
+        the local copy is read directly with zero network I/O on the payload.
+
+        If ``client.get("nz_parcels")`` on a 3-million-row geospatial dataset
+        takes 15+ minutes, use ``get_local`` instead — it serves a
+        pre-materialised GeoParquet from CDN, not a live Iceberg scan.
+
+        Args:
+            name: Dataset identifier, e.g. ``"nz_parcels"``.
+            cache_dir: Local directory for cached files (``~``-expanded). Created
+                if absent. ``None`` (default) resolves via the library
+                precedence chain (``EOLAS_LIBRARY`` env → ``library_dir`` in
+                ``~/.eolas/config.json`` → interactive prompt on first TTY call →
+                ``~/.cache/eolas/``). An explicit value always wins.
+            format: ``"parquet"``, ``"csv_gz"``, or ``"geoparquet"``. ``None``
+                (default) auto-detects from dataset metadata (geo → geoparquet).
+            freshness: ``"auto"`` (default), ``"monthly"``, or ``"current"`` —
+                passed verbatim to :meth:`sync_bulk`.
+            as_geo: When ``True`` (default) and the file is GeoParquet and
+                geopandas is installed, returns a ``geopandas.GeoDataFrame``;
+                otherwise a plain ``pd.DataFrame`` with the raw WKB column.
+                Ignored when ``as_arrow=True``.
+            as_arrow: When ``True``, return a ``pyarrow.Table`` directly (no
+                geometry materialisation). Cannot be combined with
+                ``as_geo=True`` (raises ``ValueError``).
+            progress: Forwarded to :meth:`sync_bulk` (``None`` auto-detects TTY).
+
+        Returns:
+            ``pd.DataFrame`` (tabular) or ``geopandas.GeoDataFrame`` (geo +
+            ``as_geo`` + geopandas installed) or ``pyarrow.Table`` (``as_arrow``).
+
+        Raises:
+            BulkUpgradeRequired / BulkLicenceRestricted / BulkNotYetAvailable:
+                propagate unchanged from :meth:`sync_bulk`.
+
+        See Also:
+            :meth:`sync_bulk` — advanced control over the sync lifecycle.
+        """
+        # ---- as_arrow / as_geo conflict guard (only when BOTH explicit) ------
+        if as_arrow and as_geo is True:
+            raise ValueError(
+                "as_arrow=True and as_geo=True are mutually exclusive. "
+                "as_arrow returns a pyarrow.Table (no geometry materialisation); "
+                "as_geo materialises geometry as shapely objects in a GeoDataFrame. "
+                "Choose one."
+            )
+        # Resolve as_geo: None → True (auto) unless as_arrow overrides.
+        resolved_as_geo = as_geo if as_geo is not None else (not as_arrow)
+
+        # ---- resolve cache_dir -----------------------------------------------
+        if cache_dir is not None:
+            cache_path = pathlib.Path(cache_dir).expanduser().resolve()
+        else:
+            cache_path = resolve_library_dir()
+        cache_path.mkdir(parents=True, exist_ok=True)
+
+        # ---- auto-detect format if not specified -----------------------------
+        if format is None:
+            try:
+                meta = self.info(name)
+                gt = meta.get("geometry_type")
+                wkt = meta.get("geometry_wkt")
+                gt_truthy = bool(gt) and gt != "none"
+                wkt_truthy = bool(wkt) and wkt != "none"
+                is_geo = gt_truthy or wkt_truthy or bool(meta.get("has_geometry"))
+            except Exception:
+                is_geo = False
+            fmt = "geoparquet" if is_geo else "parquet"
+        else:
+            fmt = format.lower()
+            if fmt not in self._BULK_EXTENSIONS:
+                raise ValueError(
+                    f"Unknown format {format!r}. Expected one of: "
+                    + ", ".join(self._BULK_EXTENSIONS)
+                )
+
+        # ---- compute local file path -----------------------------------------
+        ext = self._BULK_EXTENSIONS[fmt]
+        file_path = cache_path / f"{name}{ext}"
+
+        # ---- sync (download if needed, HEAD check if cached) -----------------
+        self.sync_bulk(name, path=file_path, format=fmt, freshness=freshness, progress=progress)
+
+        # ---- read the local file into a DataFrame ----------------------------
+        if as_arrow:
+            import pyarrow.parquet as _pq
+            if fmt == "csv_gz":
+                import pyarrow as _pa
+                return _pa.Table.from_pandas(pd.read_csv(file_path), preserve_index=False)
+            return _pq.read_table(file_path)
+
+        if fmt == "geoparquet":
+            if resolved_as_geo:
+                try:
+                    import geopandas as gpd
+                    return gpd.read_parquet(file_path)
+                except ImportError:
+                    pass
+            return pd.read_parquet(file_path)
+        elif fmt == "csv_gz":
+            return pd.read_csv(file_path)  # pandas handles .gz automatically
+        else:  # parquet
+            return pd.read_parquet(file_path)
 
     # ------------------------------------------------------------------
     # Core data fetch
