@@ -188,44 +188,6 @@ def test_prompt_only_once_per_session(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# test_get_local_explicit_cache_dir_overrides_library
-# ---------------------------------------------------------------------------
-
-def test_get_local_explicit_cache_dir_overrides_library(tmp_path, monkeypatch):
-    """Explicit cache_dir= to get_local() wins over any library config."""
-    from eolas_data import Client, SyncResult
-    import eolas_data.library as lib
-
-    monkeypatch.setenv("EOLAS_LIBRARY", str(tmp_path / "from_env"))
-    explicit_dir = tmp_path / "explicit"
-
-    client = Client("eolas_testkey", base_url="https://api.eolas.fyi")
-
-    synced_dirs = []
-
-    def fake_sync_bulk(name, *, path, format, freshness, progress=None):
-        synced_dirs.append(path.parent)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.touch()
-        return SyncResult(
-            status="downloaded",
-            previous_snapshot_id=None,
-            current_snapshot_id="snap1",
-            path=path,
-            bytes_downloaded=1024,
-        )
-
-    with (
-        patch.object(client, "info", return_value={"name": "nz_cpi"}),
-        patch.object(client, "sync_bulk", side_effect=fake_sync_bulk),
-        patch("pandas.read_parquet", return_value=pd.DataFrame({"v": [1]})),
-    ):
-        client.get_local("nz_cpi", cache_dir=str(explicit_dir))
-
-    assert len(synced_dirs) == 1
-    assert synced_dirs[0] == explicit_dir.resolve()
-
-
 # ---------------------------------------------------------------------------
 # test_cli_library_set_status_clear
 # ---------------------------------------------------------------------------

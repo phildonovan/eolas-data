@@ -22,18 +22,8 @@ from .exceptions import (
     NotFoundError,
     RateLimitError,
 )
-from .library import resolve_library_dir
-from .sync.sync import SyncResult as _SyncResult  # noqa: F401 — re-exported below
-from .sync.sync import sync_dataset as _sync_dataset
-from .sync.sync import sync_all as _sync_all
-from .sync.compact import CompactResult as _CompactResult  # noqa: F401
-from .sync.compact import compact_dataset as _compact_dataset
 
 _log = logging.getLogger("eolas_data")
-
-# Per-session set: tracks which dataset names we have already emitted the
-# auto-routing INFO message for, so we don't spam on repeated calls.
-_auto_route_notified: set[str] = set()
 
 # Imported separately so the names module is also re-exportable for users who
 # want IDE autocomplete on dataset names without instantiating a Client.
@@ -576,203 +566,6 @@ class Client:
             path=out,
             bytes_downloaded=bytes_dl,
         )
-
-    # ------------------------------------------------------------------
-    # Multi-file directory sync (pipeline verb)
-    # ------------------------------------------------------------------
-
-    def sync(
-        self,
-        name: Union[str, "DatasetName"],
-        *,
-        library_dir: Optional[Union[str, "pathlib.Path"]] = None,
-        progress: Optional[bool] = None,
-    ) -> "_SyncResult":
-        """Incrementally sync a dataset into a multi-file local directory.
-
-        This is the **pipeline verb** for eolas: it keeps a local copy of a
-        dataset up to date with minimal bandwidth.  On the first call a full
-        bulk snapshot is downloaded.  On subsequent calls only the delta since
-        the last sync is fetched (when the server supports incremental
-        delivery); if incremental delivery is unavailable a fresh full
-        snapshot is downloaded instead.
-
-        The synced dataset lives in ``library_dir/<name>/`` as a collection
-        of parquet files plus a ``_eolas-manifest.json`` lineage file.
-        Read the directory as a single logical table with::
-
-            import pyarrow.dataset as ds
-            table = ds.dataset("library_dir/nz_parcels").to_table()
-
-            # or with DuckDB:
-            import duckdb
-            df = duckdb.query("SELECT * FROM read_parquet('library_dir/nz_parcels/*.parquet')").df()
-
-        Args:
-            name:        Dataset identifier, e.g. ``"doc_huts"`` or
-                         ``"nz_parcels"``.
-            library_dir: Root directory of the local data library.  A
-                         sub-directory named ``<name>`` is created inside
-                         (e.g. ``library_dir/doc_huts/``).  ``None``
-                         (default) resolves via the library precedence
-                         chain — see :func:`eolas_data.library.resolve_library_dir`.
-            progress:    Tri-state progress bar override.  ``None`` (default)
-                         auto-detects via ``sys.stdout.isatty()``.  ``True``
-                         forces the bar on; ``False`` forces it off.
-
-        Returns:
-            A :class:`~eolas_data.sync.sync.SyncResult` with:
-
-            - ``status``: ``"snapshot_full"``, ``"snapshot_delta"``, or
-              ``"unchanged"``
-            - ``bytes_downloaded``: bytes written to disk (``0`` if unchanged)
-            - ``rows_added``: new rows in this sync (``0`` if unchanged)
-            - ``files_added``: new parquet files written (``0`` if unchanged)
-            - ``dataset``: the dataset name
-            - ``library_dir``: the resolved library root path
-
-        Raises:
-            BulkUpgradeRequired: HTTP 402 — snapshot requires Pro plan.
-            BulkLicenceRestricted: HTTP 403 — dataset excluded from bulk.
-            BulkNotYetAvailable: HTTP 503 — monthly snapshot not yet generated.
-            NotFoundError: Dataset not found.
-            AuthenticationError: Invalid or missing API key.
-
-        Examples::
-
-            from eolas_data import Client
-            client = Client("your_api_key")
-
-            # First sync: full download (~seconds from CDN)
-            r = client.sync("doc_huts", library_dir="/data/nz-warehouse")
-            print(r)  # <SyncResult dataset='doc_huts' status='snapshot_full' ...>
-
-            # Second sync: unchanged → zero I/O
-            r = client.sync("doc_huts", library_dir="/data/nz-warehouse")
-            print(r.status)  # 'unchanged'
-
-            # Inspect files written
-            import pathlib
-            for f in sorted(pathlib.Path("/data/nz-warehouse/doc_huts").iterdir()):
-                print(f.name)
-            # _eolas-manifest.json
-            # snapshot-2026-05-27.parquet  (or .geo.parquet for geo datasets)
-        """
-        if library_dir is None:
-            resolved_lib = resolve_library_dir(interactive=False)
-        else:
-            resolved_lib = pathlib.Path(library_dir).expanduser().resolve()
-
-        return _sync_dataset(
-            self,
-            str(name),
-            library_dir=resolved_lib,
-            progress=progress,
-        )
-
-    def sync_all(
-        self,
-        library_dir: Optional[Union[str, "pathlib.Path"]] = None,
-        *,
-        datasets: Optional[list] = None,
-        max_concurrent: int = 4,
-        progress: Optional[bool] = None,
-    ) -> "list[_SyncResult]":
-        """Sync multiple datasets in parallel.
-
-        Syncs all previously-synced datasets in ``library_dir`` (when
-        ``datasets`` is ``None``) or a specific list of dataset names.
-        Up to ``max_concurrent`` syncs run simultaneously via a thread pool.
-
-        Args:
-            library_dir:   Root directory of the local data library.  ``None``
-                           resolves via the library precedence chain.
-            datasets:      List of dataset names to sync.  ``None`` (default)
-                           discovers all sub-directories that contain a
-                           ``_eolas-manifest.json``.
-            max_concurrent: Maximum number of parallel sync operations
-                           (default ``4``).
-            progress:      Tri-state progress bar override passed to each
-                           sync call.
-
-        Returns:
-            A list of :class:`~eolas_data.sync.sync.SyncResult` objects, one
-            per dataset, in the same order as *datasets* (or discovery order
-            when *datasets* is ``None``).  If a single dataset fails its
-            entry has ``status="error"`` and ``error`` set; other datasets
-            complete normally.
-
-        Examples::
-
-            results = client.sync_all(
-                library_dir="/data/nz-warehouse",
-                datasets=["doc_huts", "nz_cpi"],
-            )
-            for r in results:
-                print(r.dataset, r.status)
-
-            # Refresh everything in the library
-            results = client.sync_all(library_dir="/data/nz-warehouse")
-        """
-        if library_dir is None:
-            resolved_lib = resolve_library_dir(interactive=False)
-        else:
-            resolved_lib = pathlib.Path(library_dir).expanduser().resolve()
-
-        return _sync_all(
-            self,
-            library_dir=resolved_lib,
-            datasets=datasets,
-            max_concurrent=max_concurrent,
-            progress=progress,
-        )
-
-    def compact(
-        self,
-        dataset_dir: Union[str, "pathlib.Path"],
-    ) -> "_CompactResult":
-        """Merge all parquet files in a synced dataset directory into a single snapshot.
-
-        After several incremental syncs a dataset directory accumulates one
-        snapshot file plus multiple delta files.  ``compact()`` reads all of
-        them as one logical table via :mod:`pyarrow.dataset`, writes a single
-        merged snapshot file, updates the manifest to point only at the new
-        file, and deletes the old files.
-
-        The operation is **atomic**: if anything fails mid-way, the original
-        manifest and files remain intact.  A recovery scan at the start of each
-        compact run cleans up any ``.compacting-*`` directories left by a
-        previous crash.
-
-        Args:
-            dataset_dir: Path to the dataset directory (e.g.
-                ``"/data/nz-warehouse/doc_huts"``).  Must contain a
-                ``_eolas-manifest.json``.
-
-        Returns:
-            A :class:`~eolas_data.sync.compact.CompactResult` with:
-
-            - ``dataset``: dataset name from the manifest
-            - ``rows_before``: total rows across all files pre-compaction
-            - ``rows_after``: rows in the merged snapshot (equal to
-              ``rows_before`` for append-only data)
-            - ``files_before``: number of parquet files before compaction
-            - ``files_after``: always ``1``
-            - ``bytes_saved``: disk space freed (old total − new file size)
-
-        Raises:
-            FileNotFoundError: If ``dataset_dir`` does not exist or has no
-                manifest.
-            RuntimeError: If ``pyarrow`` is not installed.
-
-        Examples::
-
-            import pathlib
-            cr = client.compact("/data/nz-warehouse/doc_huts")
-            print(cr)
-            # <CompactResult dataset='doc_huts' files=4→1 rows=1429 bytes_saved=...>
-        """
-        return _compact_dataset(pathlib.Path(dataset_dir).expanduser().resolve())
 
     # ------------------------------------------------------------------
     # Streaming helper
@@ -1372,236 +1165,8 @@ class Client:
         return result
 
     # ------------------------------------------------------------------
-    # Local-file convenience
-    # ------------------------------------------------------------------
-
-    _DEFAULT_CACHE_DIR = pathlib.Path.home() / ".cache" / "eolas"
-
-    def get_local(
-        self,
-        name: Union[str, "DatasetName"],
-        *,
-        cache_dir: Optional[Union[str, "pathlib.Path"]] = None,
-        format: Optional[str] = None,
-        freshness: str = "auto",
-        as_geo: Optional[bool] = None,
-        as_arrow: bool = False,
-        progress: Optional[bool] = None,
-    ) -> "pd.DataFrame":
-        """Force the cache+sync path.  Equivalent to ``get(name, mode='cached')``.
-
-        This is a convenience alias for users who want to be explicit about the
-        data path.  ``client.get(name)`` with ``mode='auto'`` (the default) will
-        route through here automatically for large or geospatial datasets.
-
-        ``as_geo`` defaults to ``None`` (auto: convert to GeoDataFrame when the
-        dataset is geo and geopandas is installed) rather than ``True`` when
-        ``as_arrow=True`` is passed, avoiding a conflict between the two flags.
-
-        For the full parameter documentation see :meth:`_get_local_impl`.
-        """
-        # Resolve as_geo: None → True (auto) unless as_arrow overrides.
-        resolved_as_geo = as_geo if as_geo is not None else (not as_arrow)
-        return self._get_local_impl(
-            name,
-            cache_dir=cache_dir,
-            format=format,
-            freshness=freshness,
-            as_geo=resolved_as_geo,
-            as_arrow=as_arrow,
-            progress=progress,
-        )
-
-    def _get_local_impl(
-        self,
-        name: Union[str, "DatasetName"],
-        *,
-        cache_dir: Optional[Union[str, "pathlib.Path"]] = None,
-        format: Optional[str] = None,
-        freshness: str = "auto",
-        as_geo: Optional[bool] = True,
-        as_arrow: bool = False,
-        progress: Optional[bool] = None,
-    ) -> "pd.DataFrame":
-        """Download (or serve from cache) a whole dataset as a local DataFrame.
-
-        This is the recommended path for large or geospatial datasets in a
-        notebook workflow.  On the first call it fetches the bulk file from
-        CDN (milliseconds for monthly snapshots) and writes it to the
-        configured library directory (see :func:`eolas_data.library.resolve_library_dir`).
-        On subsequent calls in the same or future sessions a lightweight HEAD
-        request checks whether the file is still current; if so the local copy
-        is read directly with zero network I/O on the data payload.
-
-        If you have been calling ``client.get("nz_parcels")`` on a 3-million-
-        row geospatial dataset and it takes 15+ minutes, use ``get_local``
-        instead — it serves a pre-materialised GeoParquet from CDN, not a live
-        Iceberg scan through the row-oriented data endpoint.
-
-        Args:
-            name: Dataset identifier, e.g. ``"nz_parcels"``.
-            cache_dir: Local directory for cached files.  Accepts ``~``-prefixed
-                strings, ``str``, or ``pathlib.Path``.  The directory is
-                created if it does not exist.  ``None`` (default) resolves via
-                the library precedence chain (``EOLAS_LIBRARY`` env var →
-                ``library_dir`` in ``~/.eolas/config.json`` → interactive
-                prompt on first TTY call → ``~/.cache/eolas/`` fallback).
-                An explicit value here always wins (highest priority).
-            format: ``"parquet"``, ``"csv_gz"``, or ``"geoparquet"``.  ``None``
-                (default) auto-detects: calls ``self.info(name)`` and checks
-                whether the dataset metadata indicates geometry; geo datasets
-                use ``"geoparquet"``, everything else uses ``"parquet"``.
-            freshness: ``"auto"`` (default), ``"monthly"``, or ``"current"``.
-                Passed verbatim to :meth:`sync_bulk`.
-            as_geo: When ``True`` (default) and the file is GeoParquet and
-                ``geopandas`` is installed, the returned object is a
-                ``geopandas.GeoDataFrame``.  When ``False`` (or geopandas is
-                not installed) the raw WKB binary column is returned in a plain
-                ``pd.DataFrame``.  Ignored when ``as_arrow=True``.
-            as_arrow: When ``True``, skip all native geometry materialisation
-                and return a ``pyarrow.Table`` directly.  Geometry stays as
-                Arrow buffers — zero-copy, suitable for DuckDB / polars
-                pipelines that work on a sample before converting to
-                GeoDataFrame.  Works for both geo and non-geo datasets.
-                Cannot be combined with ``as_geo=True`` (raises
-                ``ValueError``).
-            progress: Control the download progress bar shown during the
-                sync phase.  Forwarded verbatim to :meth:`sync_bulk`.
-                ``None`` (default) auto-detects via ``sys.stdout.isatty()``.
-
-        Returns:
-            ``pd.DataFrame`` for tabular datasets.  ``geopandas.GeoDataFrame``
-            for geospatial datasets when ``as_geo=True`` and geopandas is
-            installed.
-
-        Raises:
-            BulkUpgradeRequired: Passes through from :meth:`sync_bulk` — the
-                dataset requires a Pro plan for the requested freshness.
-            BulkLicenceRestricted: Passes through — this dataset cannot be
-                bulk-downloaded (e.g. OECD).  Use ``client.get(name)`` instead.
-            BulkNotYetAvailable: Passes through — the monthly snapshot has not
-                been generated yet.
-            NotFoundError: Dataset not found.
-            AuthenticationError: Invalid or missing API key.
-
-        Examples::
-
-            from eolas_data import Client
-            client = Client("your_api_key")
-
-            # 3-million-row geospatial dataset — first call downloads ~1 GB
-            # GeoParquet from CDN; subsequent calls return in <1 s.
-            gdf = client.get_local("nz_parcels")
-
-            # Non-geo dataset
-            df = client.get_local("nz_cpi")
-
-            # Explicit cache dir (overrides library config — highest priority)
-            df = client.get_local("nz_cpi", cache_dir="/tmp/eolas-cache")
-
-            # Force CSV format
-            df = client.get_local("nz_cpi", format="csv_gz")
-
-            # Keep raw WKB column instead of converting to GeoDataFrame
-            df = client.get_local("nz_parcels", as_geo=False)
-
-        See Also:
-            :meth:`sync_bulk` — for advanced control over the sync lifecycle.
-            https://docs.eolas.fyi/bulk-downloads/
-        """
-        # ---- as_arrow / as_geo conflict guard ------------------------------------
-        # Both flags being True is contradictory — raise early so the error is
-        # surfaced regardless of whether the dataset has geometry.
-        if as_arrow and as_geo is True:
-            raise ValueError(
-                "as_arrow=True and as_geo=True are mutually exclusive. "
-                "as_arrow returns a pyarrow.Table (no geometry materialisation); "
-                "as_geo materialises geometry as shapely objects in a GeoDataFrame. "
-                "Choose one."
-            )
-
-        # ---- resolve cache_dir -----------------------------------------------
-        # Explicit cache_dir= arg wins outright (Step 1 of the precedence chain).
-        # None triggers the library resolver (Steps 2-5).
-        if cache_dir is not None:
-            cache_path = pathlib.Path(cache_dir).expanduser().resolve()
-        else:
-            cache_path = resolve_library_dir()
-        cache_path.mkdir(parents=True, exist_ok=True)
-
-        # ---- auto-detect format if not specified -----------------------------
-        if format is None:
-            try:
-                meta = self.info(name)
-                gt  = meta.get("geometry_type")
-                wkt = meta.get("geometry_wkt")
-                gt_truthy  = bool(gt)  and gt  != "none"
-                wkt_truthy = bool(wkt) and wkt != "none"
-                is_geo = gt_truthy or wkt_truthy or bool(meta.get("has_geometry"))
-            except Exception:
-                is_geo = False
-            fmt = "geoparquet" if is_geo else "parquet"
-        else:
-            fmt = format.lower()
-            if fmt not in self._BULK_EXTENSIONS:
-                raise ValueError(
-                    f"Unknown format {format!r}. Expected one of: "
-                    + ", ".join(self._BULK_EXTENSIONS)
-                )
-
-        # ---- compute local file path -----------------------------------------
-        ext = self._BULK_EXTENSIONS[fmt]  # e.g. ".parquet", ".csv.gz", ".geo.parquet"
-        file_path = cache_path / f"{name}{ext}"
-
-        # ---- sync (download if needed, HEAD check if cached) -----------------
-        # Bulk exceptions (BulkLicenceRestricted, BulkUpgradeRequired,
-        # BulkNotYetAvailable) propagate unchanged — their messages already
-        # tell the user what to do.
-        self.sync_bulk(name, path=file_path, format=fmt, freshness=freshness, progress=progress)
-
-        # ---- read the local file into a DataFrame ----------------------------
-        # as_arrow=True: return a pyarrow.Table directly, skipping all
-        # geometry materialisation.  Works for every format.
-        if as_arrow:
-            import pyarrow.parquet as _pq
-            if fmt == "csv_gz":
-                # CSV-GZ: read via pandas then convert to Arrow — small cost,
-                # still avoids shapely / WKB overhead.
-                import pyarrow as _pa
-                return _pa.Table.from_pandas(
-                    pd.read_csv(file_path),
-                    preserve_index=False,
-                )
-            else:
-                # parquet or geoparquet — pyarrow.parquet reads both natively.
-                return _pq.read_table(file_path)
-
-        if fmt == "geoparquet":
-            if as_geo:
-                try:
-                    import geopandas as gpd
-                    return gpd.read_parquet(file_path)
-                except ImportError:
-                    pass
-            # geopandas not installed or as_geo=False — read as plain parquet
-            return pd.read_parquet(file_path)
-        elif fmt == "csv_gz":
-            return pd.read_csv(file_path)  # pandas handles .gz automatically
-        else:  # parquet
-            return pd.read_parquet(file_path)
-
-    # ------------------------------------------------------------------
     # Core data fetch
     # ------------------------------------------------------------------
-
-    # Slice kwargs that, when present, force the live-API path in auto mode.
-    # These indicate the caller wants a filtered or size-capped subset that
-    # a whole-file bulk cache cannot serve.
-    _SLICE_KWARGS = frozenset({"start", "end", "limit", "dimensions"})
-
-    # Row-count threshold above which a bulk-eligible dataset is auto-routed
-    # through the cache+sync path instead of the live Iceberg scan.
-    _AUTO_ROUTE_ROW_THRESHOLD = 100_000
 
     def get(
         self,
@@ -1613,29 +1178,12 @@ class Client:
         limit: Optional[int] = None,
         as_geo: Optional[bool] = None,
         as_arrow: bool = False,
-        *,
-        mode: str = "auto",
     ) -> Dataset:
         """Fetch dataset rows as a pandas (or polars / geopandas) DataFrame.
 
-        The ``mode`` parameter controls which data path is used:
-
-        - ``"auto"`` (default): smart-routes based on dataset metadata.
-          If any slice kwarg (``start``, ``end``, ``limit``) is set the live
-          API is always used. Otherwise ``info(name)`` is called and the
-          result routed through :meth:`get_local` (cache+sync) when the
-          dataset is both bulk-eligible and large (>100k rows) or geospatial.
-          OECD and other licence-restricted datasets always fall through to
-          live regardless of size.
-        - ``"live"``: hit ``/v1/datasets/{name}/data`` directly, bypassing the
-          cache.  Useful for the freshest data, OECD-licence-restricted sources,
-          or small slices of big datasets (e.g. with a ``limit=``, ``start=``,
-          or ``end=`` filter).  **The server returns 413** if you request all
-          rows of a large (>100 k rows) or geometry dataset without a filter —
-          use ``mode="cached"`` (or omit ``mode=``) for whole-dataset pulls.
-        - ``"cached"``: always use the cache+sync path (same as calling
-          :meth:`get_local`). ``start``, ``end``, ``limit``, and ``format``
-          are ignored in this mode; ``as_geo`` is forwarded.
+        Hits the live ``/v1/datasets/{name}/data`` endpoint directly.  Use
+        :meth:`download_bulk` or :meth:`sync_bulk` for large datasets or
+        whole-dataset pulls.
 
         Args:
             name:   Dataset identifier, e.g. ``"nz_cpi"``. Type-checked against
@@ -1657,18 +1205,12 @@ class Client:
                     Cannot be combined with ``as_arrow=True``.
             as_arrow: When ``True``, return a ``pyarrow.Table`` instead of a
                     ``DataFrame`` / ``GeoDataFrame``.  Geometry stays as Arrow
-                    buffers — zero-copy, no shapely allocation.  Works on every
-                    dataset (geo or non-geo) and every routing mode (live,
-                    cached, auto).  On the live path the Arrow IPC response is
-                    returned directly when the server supports it; otherwise a
-                    JSON response is converted via ``pa.Table.from_pandas``.
+                    buffers — zero-copy, no shapely allocation.  On the live
+                    path the Arrow IPC response is returned directly when the
+                    server supports it; otherwise a JSON response is converted
+                    via ``pa.Table.from_pandas``.
                     Cannot be combined with ``as_geo=True`` (raises
                     ``ValueError``).
-            mode:   ``"auto"`` (default), ``"live"``, or ``"cached"``. Controls
-                    smart-routing behaviour; see above.  ``"live"`` returns 413
-                    from the server when the dataset is large/geo and no filter
-                    is set — pass ``limit=``, ``start=``, or ``end=`` to slice,
-                    or use ``mode="cached"`` for whole-dataset access.
 
         Returns:
             A :class:`Dataset` (pandas DataFrame subclass), a polars DataFrame
@@ -1677,26 +1219,13 @@ class Client:
 
         Examples::
 
-            # Smart-routing (default) — nz_parcels auto-routes to cache+sync;
-            # nz_cpi (145 rows, no geo) stays on the live path.
-            gdf = client.get("nz_parcels")    # auto → cache path in ~seconds
-            df  = client.get("nz_cpi")        # auto → live path (small dataset)
+            df  = client.get("nz_cpi")
+            df  = client.get("nz_cpi", start="2020-01-01")
+            gdf = client.get("linz_nz_parcels", limit=100)
 
-            # Force live even for large datasets
-            gdf = client.get("nz_parcels", mode="live")
-
-            # Force cache+sync explicitly (same as get_local)
-            gdf = client.get("nz_parcels", mode="cached")
-
-            # Slice queries always go live regardless of size
-            gdf = client.get("nz_parcels", limit=10)
+            # Whole-dataset bulk download → use download_bulk or sync_bulk instead.
         """
-        if mode not in ("auto", "live", "cached"):
-            raise ValueError(
-                f"Unknown mode {mode!r}. Expected 'auto', 'live', or 'cached'."
-            )
-
-        # as_arrow + as_geo conflict — check early so we fail fast regardless of mode.
+        # as_arrow + as_geo conflict — check early so we fail fast.
         if as_arrow and as_geo:
             raise ValueError(
                 "as_arrow=True and as_geo=True are mutually exclusive. "
@@ -1705,74 +1234,12 @@ class Client:
                 "Choose one."
             )
 
-        # ---- library ParquetDataset read (mode != "live", manifest present) ------
-        # When the caller has used `client.sync()` to maintain a multi-file
-        # dataset directory, reading it via PyArrow's ParquetDataset is much
-        # faster than re-downloading.  We check for this before any network I/O:
-        # if `library_dir/<name>/_eolas-manifest.json` exists, read all parquet
-        # files in that directory as one logical table.
-        #
-        # Conditions to route through the library:
-        #   1. mode is NOT "live" (live always goes to the API)
-        #   2. No slice kwargs (start/end/limit) — the full table is in the dir
-        #   3. library_dir resolves + manifest file exists
-        if mode != "live":
-            has_slice = (start is not None) or (end is not None) or (limit is not None)
-            if not has_slice:
-                _lib_result = self._try_read_from_library(
-                    name, as_arrow=as_arrow, as_geo=as_geo
-                )
-                if _lib_result is not None:
-                    return _lib_result
-
-        # ---- mode="cached": delegate entirely to the cache+sync path ----------
-        if mode == "cached":
-            as_geo_for_local = (not as_arrow) if as_geo is None else bool(as_geo)
-            return self._get_local_impl(name, as_geo=as_geo_for_local, as_arrow=as_arrow)
-
-        # ---- early in-memory cache check (before routing / network calls) -----
-        # The cache key uses the parameters that affect the live-API result.
-        # If we have a cached result, return it immediately without spending a
-        # metadata round-trip on the routing decision.
+        # ---- early in-memory cache check -------------------------------------
         _early_cache_key = f"{name}:{start}:{end}:{format}:{0 if limit is None else int(limit)}:{as_geo}"
         if self._cache is not None and _early_cache_key in self._cache:
             return self._cache[_early_cache_key]
 
-        # ---- mode="auto": decide based on slice kwargs + dataset metadata -----
-        if mode == "auto":
-            has_slice = (start is not None) or (end is not None) or (limit is not None)
-            if not has_slice:
-                # One /v1/datasets/{name} call to read metadata.
-                try:
-                    meta = self.info(name)
-                except Exception:
-                    meta = {}
-
-                bulk_ok = (meta.get("bulk_export_class", "none") or "none") != "none"
-                gt  = meta.get("geometry_type")
-                wkt = meta.get("geometry_wkt")
-                gt_truthy  = bool(gt)  and gt  != "none"
-                wkt_truthy = bool(wkt) and wkt != "none"
-                is_geo = gt_truthy or wkt_truthy or bool(meta.get("has_geometry"))
-                row_count = meta.get("row_count_at_last_refresh") or 0
-                is_large = (row_count > self._AUTO_ROUTE_ROW_THRESHOLD)
-
-                if bulk_ok and (is_geo or is_large):
-                    # Emit a one-time per-dataset INFO so notebook users see why
-                    # a disk cache is silently appearing.
-                    name_str = str(name)
-                    if name_str not in _auto_route_notified:
-                        _auto_route_notified.add(name_str)
-                        _log.info(
-                            "auto-routing %r through cache+sync (large/geo dataset). "
-                            "Use mode='live' to override, or `eolas library status` to see cache location.",
-                            name_str,
-                        )
-                    as_geo_for_local = (not as_arrow) if as_geo is None else bool(as_geo)
-                    return self._get_local_impl(name, as_geo=as_geo_for_local, as_arrow=as_arrow)
-                # Fall through to the live path.
-
-        # ---- live path (mode="live", or auto fell through) -------------------
+        # ---- live path -------------------------------------------------------
         params: dict = {}
         if start:
             params["start"] = start
@@ -1835,127 +1302,6 @@ class Client:
             self._cache[cache_key] = result
 
         return result
-
-    # ------------------------------------------------------------------
-    # Library ParquetDataset read (multi-file sync model)
-    # ------------------------------------------------------------------
-
-    def _try_read_from_library(
-        self,
-        name: Union[str, "DatasetName"],
-        *,
-        as_arrow: bool = False,
-        as_geo: Optional[bool] = None,
-    ):
-        """Return a DataFrame/Table from the library if a synced manifest exists.
-
-        Checks whether ``library_dir/<name>/_eolas-manifest.json`` exists.
-        If so, reads all parquet files in that directory as one logical table
-        via ``pyarrow.dataset.dataset()`` (which handles schema evolution and
-        multiple files transparently) and returns the result.
-
-        Returns ``None`` when:
-        - no library_dir is configured (``EOLAS_LIBRARY`` unset, no config)
-        - the manifest file does not exist (dataset not synced yet)
-        - pyarrow is not installed
-
-        This is the "magic" path: after a ``client.sync()`` call the user can
-        call ``client.get()`` / ``client.linz()`` etc. and get fast disk reads
-        transparently.
-        """
-        # Resolve the library directory (non-interactive so we never prompt).
-        try:
-            lib_dir = resolve_library_dir(interactive=False)
-        except Exception:
-            return None
-
-        # Only apply this fast-path when a real library was configured, not the
-        # fallback cache.  We detect the fallback by checking whether the path is
-        # the default cache dir — if the user hasn't explicitly set a library
-        # we don't want to accidentally read stale bulk-cache parquet files as
-        # "synced" datasets.
-        fallback = pathlib.Path.home() / ".cache" / "eolas"
-        env_set = bool(os.getenv("EOLAS_LIBRARY", "").strip())
-        config_set = bool(self._read_library_dir_from_config_static())
-        if not env_set and not config_set:
-            return None
-
-        dataset_dir = lib_dir / str(name)
-        from .sync.manifest import MANIFEST_FILENAME as _MF, read_manifest as _rm
-        manifest_path = dataset_dir / _MF
-        if not manifest_path.exists():
-            return None
-
-        # Manifest exists — read all parquet files as a single logical table.
-        try:
-            import pyarrow.dataset as _ds
-        except ImportError:
-            return None
-
-        # Collect all parquet files in the dataset directory.
-        data_files = sorted(
-            f for f in dataset_dir.iterdir()
-            if f.is_file() and (
-                f.name.endswith(".parquet") or f.name.endswith(".geo.parquet")
-            ) and not f.name.startswith(".")
-        )
-        if not data_files:
-            return None
-
-        name_str = str(name)
-        if name_str not in _auto_route_notified:
-            _auto_route_notified.add(name_str)
-            _log.info(
-                "reading %r from library_dir (%s). "
-                "Use mode='live' to bypass and hit the API instead.",
-                name_str,
-                dataset_dir,
-            )
-
-        try:
-            arrow_ds = _ds.dataset([str(f) for f in data_files], format="parquet")
-        except Exception:
-            return None
-
-        if as_arrow:
-            try:
-                tbl = arrow_ds.to_table()
-                return tbl
-            except Exception:
-                return None
-
-        # Convert to pandas.
-        try:
-            tbl = arrow_ds.to_table()
-            df = tbl.to_pandas()
-        except Exception:
-            return None
-
-        result = Dataset(df)
-        result.eolas_name   = name_str
-        result.eolas_source = ""
-
-        # Optional geopandas conversion — same logic as get() live path.
-        resolved_as_geo = (not as_arrow) if as_geo is None else bool(as_geo)
-        if resolved_as_geo and "geometry_wkt" in result.columns:
-            converted = _to_geodataframe(result, force=as_geo is True)
-            if converted is not None:
-                result = converted
-
-        return result
-
-    @staticmethod
-    def _read_library_dir_from_config_static() -> str:
-        """Read library_dir from config file without importing library module (avoids circular)."""
-        import json as _json
-        config_file = pathlib.Path.home() / ".eolas" / "config.json"
-        try:
-            if config_file.exists():
-                data = _json.loads(config_file.read_text())
-                return str(data.get("library_dir", "") or "")
-        except Exception:
-            pass
-        return ""
 
     # ------------------------------------------------------------------
     # HTTP helpers
