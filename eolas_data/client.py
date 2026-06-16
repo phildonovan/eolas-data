@@ -20,8 +20,11 @@ from .exceptions import (
     BulkLicenceRestricted,
     BulkNotYetAvailable,
     BulkUpgradeRequired,
+    ChangesLicenceRestricted,
+    ChangesUpgradeRequired,
     NotFoundError,
     RateLimitError,
+    WatermarkExpired,
 )
 
 _log = logging.getLogger("eolas_data")
@@ -34,6 +37,7 @@ from ._dataset_names import DatasetName  # noqa: F401  (public re-export)
 BASE_URL = "https://api.eolas.fyi"
 
 _SIDECAR_SCHEMA_VERSION = 1
+_SIDECAR_SCHEMA_VERSION_CDC = 2
 
 # OS-keyring constants — service name must match the R client so a key set
 # from one language is readable from the other.
@@ -80,9 +84,10 @@ def _config_file_get() -> str:
 
 @dataclass
 class SyncResult:
-    """Result of a :meth:`Client.sync_bulk` call.
+    """Result of a :meth:`Client.sync_bulk`, :meth:`Client.sync_changes`, or
+    :meth:`Client.sync` call.
 
-    Attributes:
+    Snapshot-sync fields (sync_bulk / sync when tier='snapshot'):
         status: One of ``"downloaded"`` (first time), ``"updated"``
             (new snapshot available and written), or ``"unchanged"``
             (local file is already current — no I/O performed).
@@ -92,6 +97,17 @@ class SyncResult:
             ``X-Snapshot-Version`` response header.
         path: The local file path that was written (or preserved unchanged).
         bytes_downloaded: Bytes written in this call. ``0`` when unchanged.
+
+    Changelog-sync fields (sync_changes / sync when tier='changelog'):
+        sync_mode: ``"snapshot"`` or ``"changelog"`` — which path was taken.
+            ``None`` for legacy SyncResult objects from sync_bulk calls.
+        previous_seq: The watermark seq recorded in the sidecar before this
+            call, or ``None`` when starting fresh (after baseline).
+        current_seq: The watermark seq after this call (the highest
+            ``_eolas_seq`` value seen in the pages fetched).
+        ops_applied: Number of change rows merged (non-delete rows inserted
+            plus rows deleted). ``0`` when no changes were available.
+            ``None`` for snapshot-mode results.
     """
 
     status: str
@@ -99,6 +115,12 @@ class SyncResult:
     current_snapshot_id: str
     path: pathlib.Path
     bytes_downloaded: int
+    # Changelog-specific fields — present only when sync_mode='changelog'.
+    # Defaulted so existing sync_bulk callers are unaffected.
+    sync_mode: Optional[str] = None
+    previous_seq: Optional[int] = None
+    current_seq: Optional[int] = None
+    ops_applied: Optional[int] = None
 
 
 def _to_geodataframe(df: "pd.DataFrame", force: bool = False):
@@ -567,6 +589,496 @@ class Client:
             path=out,
             bytes_downloaded=bytes_dl,
         )
+
+    # ------------------------------------------------------------------
+    # Changelog sync (CDC OUT — new in v1.2.0)
+    # ------------------------------------------------------------------
+
+    _CHANGES_PAGE_LIMIT = 50_000
+
+    def sync_changes(
+        self,
+        name: Union[str, "DatasetName"],
+        path: Union[str, "pathlib.Path"],
+        *,
+        format: str = "parquet",
+        progress: Optional[bool] = None,
+    ) -> SyncResult:
+        """Incrementally sync a changelog-tier dataset via the /changes feed.
+
+        Implements the OUT half of CDC described in
+        ``eolas/docs/metadata-cdc-design-2026-06-16.md`` (Client contract section).
+
+        On the first call (cold start):
+        1. Calls :meth:`sync_bulk` to download the full baseline snapshot.
+        2. Fetches a tail page from ``/changes`` to record the current high-water
+           seq — so the next call only asks for *new* changes, never replaying the
+           whole feed.
+        3. Writes a v2 sidecar (``schema_version=2``, ``sync_mode='changelog'``).
+
+        On subsequent calls:
+        1. Reads the watermark seq from the sidecar.
+        2. Pages through ``GET /v1/datasets/{name}/changes?since_seq=<watermark>``
+           until the server signals no more pages (``X-Eolas-Truncated: false`` or
+           ``X-Eolas-Row-Count < limit``).
+        3. pk-merges change rows into the local materialised file (atomic rewrite).
+        4. Advances the watermark and updates the sidecar.
+
+        On ``410 WatermarkExpired`` (since_seq predates the retained range):
+        Automatically re-baselines via ``sync_bulk`` and resets the watermark,
+        then returns — the next call will resume cleanly.
+
+        Args:
+            name: Dataset identifier, e.g. ``"pharmac_schedule_history"``.
+            path: **Required.** Where to write the materialised data file. The
+                sidecar lives at ``str(path) + ".eolas-meta.json"``.
+            format: ``"parquet"`` (default). Only ``"parquet"`` is supported for
+                changelog sync; other formats raise ``ValueError``.
+            progress: Forwarded to :meth:`sync_bulk` for the baseline download
+                progress bar (``None`` auto-detects TTY).
+
+        Returns:
+            A :class:`SyncResult` with ``sync_mode='changelog'``,
+            ``previous_seq``, ``current_seq``, and ``ops_applied``.
+
+        Raises:
+            ChangesUpgradeRequired: HTTP 402 — changelog sync requires Pro.
+            ChangesLicenceRestricted: HTTP 403 — dataset licence prohibits export.
+            NotFoundError: HTTP 404 — dataset not found or tier != changelog.
+            AuthenticationError: Invalid or missing API key.
+
+        Examples::
+
+            from eolas_data import Client
+
+            client = Client("your_api_key")
+
+            # First call: baseline bulk download + watermark set
+            r = client.sync_changes("pharmac_schedule_history", path="pharmac.parquet")
+            print(r.sync_mode)    # 'changelog'
+            print(r.current_seq)  # e.g. 514000
+
+            # Subsequent calls: apply only what changed
+            r = client.sync_changes("pharmac_schedule_history", path="pharmac.parquet")
+            print(r.ops_applied)  # e.g. 1200
+
+        See Also:
+            :meth:`sync` — unified dispatcher that routes on cdc_serving_tier.
+        """
+        fmt = format.lower()
+        if fmt != "parquet":
+            raise ValueError(
+                f"sync_changes only supports format='parquet'; got {format!r}. "
+                "Changelog feed is always delivered as Parquet."
+            )
+
+        out = pathlib.Path(path).expanduser().resolve()
+        sidecar_path = pathlib.Path(str(out) + ".eolas-meta.json")
+
+        # Read sidecar.
+        sidecar: Optional[dict] = None
+        if sidecar_path.exists():
+            try:
+                sidecar = json.loads(sidecar_path.read_text())
+            except Exception:
+                sidecar = None
+
+        # Determine if we need a cold-start baseline.
+        needs_baseline = (
+            sidecar is None
+            or sidecar.get("sync_mode") != "changelog"
+            or sidecar.get("watermark_seq") is None
+        )
+
+        # Fetch dataset metadata (needed for pk_columns, current_state_filter,
+        # and to validate this is a changelog-tier dataset).
+        meta = self._get(f"/v1/datasets/{name}")
+        pk_columns: list[str] = meta.get("pk_columns") or []
+        current_state_filter: Optional[str] = meta.get("current_state_filter")
+        namespace = meta.get("namespace") or ""
+        table = meta.get("table") or meta.get("name") or str(name)
+
+        changes_url = f"/v1/datasets/{name}/changes"
+
+        if needs_baseline:
+            _log.info("sync_changes(%s): cold start — running baseline sync_bulk", name)
+            bulk_result = self.sync_bulk(
+                name,
+                path=out,
+                format=fmt,
+                freshness="current",
+                progress=progress,
+            )
+            baseline_snapshot_id = bulk_result.current_snapshot_id
+
+            # Read the current high-water seq from the server so the next call
+            # fetches only genuinely new changes. We do a single tail page
+            # (since_seq=very_large_int returns empty or last page, giving us
+            # the X-Eolas-Seq-High header cheaply).
+            # Strategy: use a large since_seq (maxint64). The server will return
+            # 0 rows with X-Eolas-Seq-High set to the current maximum seq.
+            high_seq = self._fetch_changes_seq_high(changes_url, since_seq=2**62)
+            watermark_seq = high_seq
+
+            # Write v2 sidecar.
+            self._write_changelog_sidecar(
+                sidecar_path,
+                name=str(name),
+                fmt=fmt,
+                pk_columns=pk_columns,
+                current_state_filter=current_state_filter,
+                baseline_snapshot_id=baseline_snapshot_id,
+                watermark_seq=watermark_seq,
+            )
+
+            return SyncResult(
+                status="downloaded",
+                previous_snapshot_id=None,
+                current_snapshot_id=baseline_snapshot_id,
+                path=out,
+                bytes_downloaded=bulk_result.bytes_downloaded,
+                sync_mode="changelog",
+                previous_seq=None,
+                current_seq=watermark_seq,
+                ops_applied=0,
+            )
+
+        # --- Incremental path: we have a valid changelog sidecar. ---
+        prev_watermark = int(sidecar.get("watermark_seq", 0))
+        baseline_snapshot_id = sidecar.get("baseline_snapshot_id", "")
+        # Use pk_columns from sidecar if server didn't return them (registry
+        # may not have been stamped yet on this dataset).
+        if not pk_columns:
+            pk_columns = sidecar.get("pk_columns") or []
+        if not current_state_filter:
+            current_state_filter = sidecar.get("current_state_filter")
+
+        try:
+            all_changes, final_seq = self._fetch_all_change_pages(
+                changes_url, since_seq=prev_watermark
+            )
+        except WatermarkExpired:
+            # 410: since_seq predates retained range. Re-baseline and reset.
+            _log.warning(
+                "sync_changes(%s): watermark expired (seq=%d) — re-baselining",
+                name,
+                prev_watermark,
+            )
+            bulk_result = self.sync_bulk(
+                name,
+                path=out,
+                format=fmt,
+                freshness="current",
+                progress=progress,
+            )
+            baseline_snapshot_id = bulk_result.current_snapshot_id
+            high_seq = self._fetch_changes_seq_high(changes_url, since_seq=2**62)
+            watermark_seq = high_seq
+            self._write_changelog_sidecar(
+                sidecar_path,
+                name=str(name),
+                fmt=fmt,
+                pk_columns=pk_columns,
+                current_state_filter=current_state_filter,
+                baseline_snapshot_id=baseline_snapshot_id,
+                watermark_seq=watermark_seq,
+            )
+            return SyncResult(
+                status="updated",
+                previous_snapshot_id=sidecar.get("baseline_snapshot_id"),
+                current_snapshot_id=baseline_snapshot_id,
+                path=out,
+                bytes_downloaded=bulk_result.bytes_downloaded,
+                sync_mode="changelog",
+                previous_seq=prev_watermark,
+                current_seq=watermark_seq,
+                ops_applied=0,
+            )
+
+        # No changes available.
+        if all_changes.empty:
+            return SyncResult(
+                status="unchanged",
+                previous_snapshot_id=sidecar.get("baseline_snapshot_id"),
+                current_snapshot_id=baseline_snapshot_id,
+                path=out,
+                bytes_downloaded=0,
+                sync_mode="changelog",
+                previous_seq=prev_watermark,
+                current_seq=prev_watermark,
+                ops_applied=0,
+            )
+
+        # Merge changes into the local materialised file.
+        from .cdc import merge_changes
+
+        # Read the local file.
+        import pyarrow.parquet as _pq
+        if out.exists():
+            local_df = _pq.read_table(str(out)).to_pandas()
+        else:
+            local_df = pd.DataFrame()
+
+        merged_df = merge_changes(
+            local_df,
+            all_changes,
+            pk_columns=pk_columns,
+            current_state_filter=current_state_filter,
+        )
+
+        # Atomic write.
+        from .cdc import df_to_parquet_bytes
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tmp = out.with_suffix(out.suffix + f".eolas-tmp-{os.urandom(4).hex()}")
+        try:
+            tmp.write_bytes(df_to_parquet_bytes(merged_df))
+            os.replace(tmp, out)
+        except Exception:
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise
+
+        # Count ops: non-delete insertions + deletes (rows whose PK we dropped).
+        ops_applied = len(all_changes)
+
+        # Advance watermark and update sidecar.
+        self._write_changelog_sidecar(
+            sidecar_path,
+            name=str(name),
+            fmt=fmt,
+            pk_columns=pk_columns,
+            current_state_filter=current_state_filter,
+            baseline_snapshot_id=baseline_snapshot_id,
+            watermark_seq=final_seq,
+        )
+
+        return SyncResult(
+            status="updated",
+            previous_snapshot_id=baseline_snapshot_id,
+            current_snapshot_id=baseline_snapshot_id,
+            path=out,
+            bytes_downloaded=0,
+            sync_mode="changelog",
+            previous_seq=prev_watermark,
+            current_seq=final_seq,
+            ops_applied=ops_applied,
+        )
+
+    def sync(
+        self,
+        name: Union[str, "DatasetName"],
+        path: Union[str, "pathlib.Path"],
+        *,
+        format: str = "parquet",
+        freshness: str = "auto",
+        progress: Optional[bool] = None,
+    ) -> SyncResult:
+        """Unified sync dispatcher — keeps a local file current automatically.
+
+        Reads ``cdc_serving_tier`` from ``info(name)`` and dispatches:
+
+        - ``tier='snapshot'`` (the default for ~1480 tables) → :meth:`sync_bulk`.
+          HEAD-checks the snapshot id; re-downloads only when a new ETL run has
+          produced a new snapshot. Watermark = snapshot id.
+        - ``tier='changelog'`` (~15-30 high-churn tables) → :meth:`sync_changes`.
+          Applies only the rows that changed since the local watermark seq.
+          Watermark = ``_eolas_seq`` (survives snapshot expiry).
+
+        The tier is declared server-side in the stream registry. It is NOT
+        inferred by the client — this avoids the "smart routing" footgun where a
+        client guesses wrong and silently corrupts data. Call ``info(name)`` to
+        inspect the tier yourself.
+
+        Args:
+            name: Dataset identifier.
+            path: Local file path. Sidecar lives at ``str(path) + ".eolas-meta.json"``.
+            format: ``"parquet"`` (default). Only ``"parquet"`` is supported for
+                ``tier='changelog'``; other formats work for snapshot tier.
+            freshness: ``"auto"`` (default), ``"monthly"``, or ``"current"``. Only
+                used for the snapshot path (passed to :meth:`sync_bulk`).
+            progress: Control the download progress bar.
+
+        Returns:
+            A :class:`SyncResult`. The ``sync_mode`` field is ``"snapshot"`` or
+            ``"changelog"`` indicating which path was taken.
+
+        Raises:
+            The same exceptions as the dispatched method.
+
+        Examples::
+
+            from eolas_data import Client
+            import pandas as pd
+
+            client = Client("your_api_key")
+
+            # Works for any dataset regardless of tier:
+            r = client.sync("pharmac_schedule_history", path="pharmac.parquet")
+            df = pd.read_parquet("pharmac.parquet")
+        """
+        meta = self._get(f"/v1/datasets/{name}")
+        tier = meta.get("cdc_serving_tier", "snapshot") or "snapshot"
+
+        if tier == "changelog":
+            return self.sync_changes(name, path, format=format, progress=progress)
+        else:
+            result = self.sync_bulk(
+                name,
+                path=path,
+                format=format,
+                freshness=freshness,
+                progress=progress,
+            )
+            # Tag the result with sync_mode so callers don't need to inspect tier.
+            result.sync_mode = "snapshot"
+            return result
+
+    def _fetch_all_change_pages(
+        self,
+        changes_url: str,
+        since_seq: int,
+    ) -> tuple["pd.DataFrame", int]:
+        """Fetch all pages from the /changes endpoint and concatenate them.
+
+        Returns (changes_df, final_seq) where final_seq is the X-Eolas-Seq-High
+        from the last page (the new watermark).
+
+        Pagination stop conditions (in priority order):
+        1. X-Eolas-Truncated == 'false' (server explicit — always respected).
+        2. X-Eolas-Row-Count == 0 (empty page — nothing more to read).
+        3. X-Eolas-Truncated header absent AND row_count < limit (fallback
+           heuristic for servers that omit the header). This is secondary to
+           the explicit header because a small last page can coexist with
+           Truncated=true (server decided to split mid-limit).
+
+        Raises WatermarkExpired on HTTP 410.
+        """
+        pages: list["pd.DataFrame"] = []
+        current_seq = since_seq
+        final_seq = since_seq
+
+        while True:
+            resp = self._raw_changes_get(
+                changes_url,
+                params={
+                    "since_seq": current_seq,
+                    "limit": self._CHANGES_PAGE_LIMIT,
+                    "format": "parquet",
+                },
+            )
+            seq_high = int(resp.headers.get("X-Eolas-Seq-High", current_seq))
+            row_count = int(resp.headers.get("X-Eolas-Row-Count", 0))
+            truncated_raw = resp.headers.get("X-Eolas-Truncated")
+            # Explicit header wins. Absent header → fall back to row_count heuristic.
+            if truncated_raw is not None:
+                truncated = truncated_raw.lower() == "true"
+            else:
+                # Heuristic: if the server filled the limit exactly, assume more.
+                truncated = row_count >= self._CHANGES_PAGE_LIMIT
+
+            if row_count > 0 and resp.content:
+                from .cdc import read_parquet_bytes
+                page_df = read_parquet_bytes(resp.content)
+                pages.append(page_df)
+
+            final_seq = seq_high
+
+            # Stop when server says not truncated, or when the page was empty.
+            if not truncated or row_count == 0:
+                break
+
+            # Advance cursor to the high-water of this page.
+            current_seq = seq_high
+
+        if not pages:
+            return pd.DataFrame(), final_seq
+
+        return pd.concat(pages, ignore_index=True, sort=False), final_seq
+
+    def _fetch_changes_seq_high(self, changes_url: str, since_seq: int) -> int:
+        """Fetch a single /changes page and return X-Eolas-Seq-High.
+
+        Used during cold-start to anchor the watermark at the current feed head
+        without replaying any history. Returns 0 if the header is absent.
+        """
+        try:
+            resp = self._raw_changes_get(
+                changes_url,
+                params={
+                    "since_seq": since_seq,
+                    "limit": 1,
+                    "format": "parquet",
+                },
+            )
+            return int(resp.headers.get("X-Eolas-Seq-High", 0))
+        except Exception:
+            return 0
+
+    def _raw_changes_get(
+        self,
+        path: str,
+        params: Optional[dict] = None,
+    ) -> requests.Response:
+        """GET the /changes endpoint, raising typed exceptions for known status codes."""
+        url = f"{self._base}{path}"
+        resp = self._session.get(url, params=params)
+        if resp.status_code == 200:
+            return resp
+        if resp.status_code == 402:
+            try:
+                detail = resp.json().get("detail", "")
+            except Exception:
+                detail = ""
+            raise ChangesUpgradeRequired(detail) if detail else ChangesUpgradeRequired()
+        if resp.status_code == 403:
+            try:
+                body = resp.json()
+                detail = body.get("detail", "")
+            except Exception:
+                detail = ""
+            if detail and "licence" in detail.lower():
+                raise ChangesLicenceRestricted(detail)
+            raise AuthenticationError(detail or "API key is inactive.")
+        if resp.status_code == 410:
+            try:
+                body = resp.json()
+                min_seq = int(body.get("min_available_seq", 0))
+                detail = body.get("error", "watermark_expired")
+            except Exception:
+                min_seq = 0
+                detail = "watermark_expired"
+            raise WatermarkExpired(detail, min_available_seq=min_seq)
+        self._raise_for_status(resp)
+        return resp  # unreachable but satisfies type checkers
+
+    @staticmethod
+    def _write_changelog_sidecar(
+        sidecar_path: "pathlib.Path",
+        *,
+        name: str,
+        fmt: str,
+        pk_columns: list,
+        current_state_filter: Optional[str],
+        baseline_snapshot_id: str,
+        watermark_seq: int,
+    ) -> None:
+        """Write or update the v2 changelog sidecar file."""
+        data = {
+            "schema_version": _SIDECAR_SCHEMA_VERSION_CDC,
+            "sync_mode": "changelog",
+            "name": name,
+            "format": fmt,
+            "pk_columns": pk_columns,
+            "current_state_filter": current_state_filter,
+            "baseline_snapshot_id": baseline_snapshot_id,
+            "watermark_seq": watermark_seq,
+            "updated_at": datetime.datetime.now(datetime.timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            ),
+        }
+        sidecar_path.write_text(json.dumps(data, indent=2) + "\n")
 
     # ------------------------------------------------------------------
     # Streaming helper

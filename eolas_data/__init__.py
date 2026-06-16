@@ -7,12 +7,15 @@ from .exceptions import (
     BulkLicenceRestricted,
     BulkNotYetAvailable,
     BulkUpgradeRequired,
+    ChangesLicenceRestricted,
+    ChangesUpgradeRequired,
     EolasError,
     NotFoundError,
     RateLimitError,
+    WatermarkExpired,
 )
 
-__version__ = "1.0.0"
+__version__ = "1.2.0"
 
 __all__ = [
     "Client",
@@ -26,4 +29,7 @@ __all__ = [
     "BulkUpgradeRequired",
     "BulkLicenceRestricted",
     "BulkNotYetAvailable",
+    "ChangesUpgradeRequired",
+    "ChangesLicenceRestricted",
+    "WatermarkExpired",
 ]
