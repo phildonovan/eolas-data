@@ -42,6 +42,13 @@ def _isolated_config(tmp_path, monkeypatch):
     # Also unset any real env-var keys so tests start clean.
     monkeypatch.delenv("EOLAS_API_KEY", raising=False)
     monkeypatch.delenv("VS_API_KEY",    raising=False)
+    # Stub the OS-keyring lookup to "no key" so these CLI tests are hermetic —
+    # a dev box with a real `eolas` Secret Service entry must not leak into the
+    # "no key configured" baseline. Patch cli_module's binding (cli.py does
+    # `from .client import _keyring_get`, so it's bound here, not on client).
+    # Keyring PRECEDENCE/source behaviour is covered separately in test_keyring.py
+    # (which patches keyring.get_password directly and keeps the real _keyring_get).
+    monkeypatch.setattr(cli_module, "_keyring_get", lambda: "")
     yield
 
 
