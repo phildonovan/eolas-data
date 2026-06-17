@@ -44,7 +44,7 @@ def test_get_live_as_arrow_returns_arrow_table(client):
     """as_arrow=True on the live path converts the JSON-fetched DataFrame to pa.Table."""
     fake_df = pd.DataFrame({"date": ["2023-01-01"], "value": [1100.5]})
 
-    with patch.object(client, "_fetch_dataframe", return_value=fake_df):
+    with patch.object(client, "_fetch_dataframe", return_value=(fake_df, {}, None)):
         result = client.get("nz_cpi", as_arrow=True)
 
     assert isinstance(result, pa.Table)

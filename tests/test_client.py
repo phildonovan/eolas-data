@@ -168,6 +168,38 @@ def test_get_passes_date_params(client):
 
 
 @resp_lib.activate
+def test_get_merges_provenance_headers(client):
+    resp_lib.add(
+        resp_lib.GET,
+        f"{BASE}/v1/datasets/nz_cpi/data",
+        json={"data": RECORDS},
+        adding_headers={
+            "X-Eolas-Attribution": "Source: OECD, CC-BY 4.0.",
+            "X-Eolas-Licence": "CC-BY 4.0",
+            "X-Eolas-Source": "OECD",
+        },
+    )
+    df = client.get("nz_cpi", meta=False)
+    meta = df.attrs.get("eolas_meta", {})
+    assert meta.get("attribution_text") == "Source: OECD, CC-BY 4.0."
+    assert meta.get("licence") == "CC-BY 4.0"
+    assert meta.get("source") == "OECD"
+
+
+@resp_lib.activate
+def test_get_envelope_attaches_data_sources(client):
+    payload = {
+        "data_sources": [{"name": "nz_cpi", "licence": "CC-BY 4.0"}],
+        "data": RECORDS,
+    }
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi/data", json=payload)
+    df = client.get("nz_cpi", envelope=True, meta=False)
+    meta = df.attrs.get("eolas_meta", {})
+    assert meta.get("data_sources") == payload["data_sources"]
+    assert "envelope=1" in resp_lib.calls[0].request.url
+
+
+@resp_lib.activate
 def test_get_csv_returns_dataframe(client):
     csv_body = "date,period,value\n2023-01-01,2023Q1,100.0\n"
     resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi/data",

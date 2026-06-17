@@ -15,7 +15,7 @@ import requests
 from .console import nag_json_transport_once
 from .dataset import Dataset
 from .library import resolve_library_dir
-from .meta import attach_meta, split_meta
+from .meta import attach_meta, merge_provenance, split_meta
 from .exceptions import (
     APIError,
     AuthenticationError,
@@ -269,6 +269,8 @@ class Client:
         *,
         source: str = "",
         meta: bool = True,
+        provenance: Optional[dict] = None,
+        data_sources: Optional[list] = None,
     ) -> "pd.DataFrame":
         table_meta: dict = {}
         column_meta = None
@@ -277,10 +279,14 @@ class Client:
                 table_meta, column_meta = split_meta(self._info_cached(name))
             except Exception:
                 pass
+        if provenance:
+            table_meta = merge_provenance(table_meta, provenance)
+        if data_sources:
+            table_meta = {**table_meta, "data_sources": data_sources}
         return attach_meta(
             result,
             name=str(name),
-            source=source,
+            source=source or (table_meta.get("source") or ""),
             table_meta=table_meta,
             column_meta=column_meta,
         )
@@ -1917,6 +1923,7 @@ class Client:
         as_geo: Optional[bool] = None,
         as_arrow: bool = False,
         meta: bool = True,
+        envelope: bool = False,
     ) -> Dataset:
         """Fetch dataset rows as a pandas (or polars / geopandas) DataFrame.
 
@@ -1954,6 +1961,9 @@ class Client:
             meta: When ``True`` (default), attach table/column metadata from
                     :meth:`info` (session-cached on this client). Pass
                     ``False`` to skip the extra round-trip.
+            envelope: When ``True``, request ``?envelope=1`` (JSON only) and
+                    attach the ``data_sources`` licence block alongside rows.
+                    Response ``X-Eolas-*`` headers are merged into metadata.
 
         Returns:
             A :class:`Dataset` (pandas DataFrame subclass), a polars DataFrame
@@ -1976,6 +1986,10 @@ class Client:
                 "as_geo materialises geometry as shapely objects in a GeoDataFrame. "
                 "Choose one."
             )
+        if envelope and (format != "json" or as_arrow):
+            raise ValueError(
+                "envelope=True requires format='json' and as_arrow=False."
+            )
 
         # ---- early in-memory cache check -------------------------------------
         _early_cache_key = f"{name}:{start}:{end}:{format}:{0 if limit is None else int(limit)}:{as_geo}"
@@ -1997,12 +2011,17 @@ class Client:
         if self._cache is not None and cache_key in self._cache:
             return self._cache[cache_key]
 
+        data_sources = None
+        provenance = None
         if format == "csv":
             from io import StringIO
             resp = self._raw_get(f"/v1/datasets/{name}/data", params={"format": "csv", **params})
+            provenance = resp.headers
             df   = pd.read_csv(StringIO(resp.text))
         else:
-            df = self._fetch_dataframe(name, params)
+            df, provenance, data_sources = self._fetch_dataframe(
+                name, params, envelope=envelope,
+            )
             if "date" in df.columns:
                 df["date"] = pd.to_datetime(df["date"])
 
@@ -2020,7 +2039,10 @@ class Client:
             return tbl
 
         result = Dataset(df)
-        result = self._attach_dataset_meta(result, name, meta=meta)
+        result = self._attach_dataset_meta(
+            result, name, meta=meta,
+            provenance=provenance, data_sources=data_sources,
+        )
 
         if engine == "polars":
             try:
@@ -2048,13 +2070,27 @@ class Client:
     # HTTP helpers
     # ------------------------------------------------------------------
 
-    def _fetch_dataframe(self, name, params: dict) -> pd.DataFrame:
+    def _fetch_dataframe(
+        self, name, params: dict, *, envelope: bool = False,
+    ) -> tuple[pd.DataFrame, object, Optional[list]]:
         """Fetch dataset rows as a DataFrame, negotiating Arrow IPC over the
         wire (≈5x faster end-to-end, ≈82x faster parse than JSON on large
         pulls — benchmarked 2026-05-18). Transparently falls back to JSON for
         older servers, unexpected content-types, or any pyarrow issue, so the
         returned DataFrame is identical either way.
+
+        Returns ``(dataframe, response_headers, data_sources_or_none)``.
         """
+        if envelope:
+            resp = self._raw_get(
+                f"/v1/datasets/{name}/data",
+                params={**params, "envelope": 1},
+            )
+            payload = resp.json()
+            records = payload.get("data", payload) if isinstance(payload, dict) else payload
+            sources = payload.get("data_sources") if isinstance(payload, dict) else None
+            return pd.DataFrame(records), resp.headers, sources
+
         if self._arrow_supported is not False:
             try:
                 import io
@@ -2067,7 +2103,7 @@ class Client:
                 if "arrow" in resp.headers.get("content-type", ""):
                     self._arrow_supported = True
                     tbl = pa.ipc.open_stream(io.BytesIO(resp.content)).read_all()
-                    return tbl.to_pandas()
+                    return tbl.to_pandas(), resp.headers, None
                 # Old server ignored format=arrow and returned JSON. Remember
                 # so we don't pay the failed round-trip on every future call.
                 self._arrow_supported = False
@@ -2076,9 +2112,11 @@ class Client:
                 self._arrow_supported = False
                 nag_json_transport_once()
 
-        data = self._get(f"/v1/datasets/{name}/data", params=params)
+        resp = self._raw_get(f"/v1/datasets/{name}/data", params=params)
+        data = resp.json()
         records = data.get("data", data) if isinstance(data, dict) else data
-        return pd.DataFrame(records)
+        sources = data.get("data_sources") if isinstance(data, dict) else None
+        return pd.DataFrame(records), resp.headers, sources
 
     def _get(self, path: str, params: Optional[dict] = None) -> dict:
         return self._raw_get(path, params=params).json()

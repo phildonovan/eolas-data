@@ -6,6 +6,35 @@ from typing import Any, Optional
 import pandas as pd
 
 # Table-level fields we keep on Dataset.eolas_meta (exclude nested columns).
+_PROVENANCE_HEADERS = {
+    "X-Eolas-Attribution": "attribution_text",
+    "X-Eolas-Licence": "licence",
+    "X-Eolas-Source": "source",
+    "X-Eolas-Source-URL": "source_url",
+    "X-Eolas-Namespace": "namespace",
+}
+
+
+def provenance_from_headers(headers) -> dict:
+    """Extract response provenance from X-Eolas-* headers on /data responses."""
+    out: dict[str, str] = {}
+    get = headers.get if hasattr(headers, "get") else lambda k, d=None: headers.get(k, d)
+    for hdr, key in _PROVENANCE_HEADERS.items():
+        val = get(hdr)
+        if val:
+            out[key] = str(val)
+    return out
+
+
+def merge_provenance(table_meta: Optional[dict], headers) -> dict:
+    """Merge catalogue metadata with live response headers (headers win when set)."""
+    merged = dict(table_meta or {})
+    for key, val in provenance_from_headers(headers).items():
+        if val:
+            merged[key] = val
+    return merged
+
+
 _TABLE_META_KEYS = (
     "name",
     "namespace",
