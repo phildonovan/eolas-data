@@ -150,3 +150,17 @@ def test_roundtrip_idempotent_replay():
     twice = merge_changes(once, changes, pk_columns=["id"])  # replay the same feed
 
     assert_frame_equal(_canon(once, ["id"]), _canon(twice, ["id"]))
+
+
+def test_current_state_filter_type_tolerant():
+    # Parity with the R client's eolas_apply_current_state_filter: a boolean filter matches the
+    # column whether stored as boolean OR as a "true"/"false" string (schema drift). Strict
+    # df[col]==True would drop every row on string storage and diverge from R.
+    from eolas_data.cdc import apply_current_state_filter
+    assert len(apply_current_state_filter(
+        pd.DataFrame({"id": [1, 2], "is_current": ["true", "false"]}), "is_current = true")) == 1
+    assert len(apply_current_state_filter(
+        pd.DataFrame({"id": [1, 2], "is_current": [True, False]}), "is_current = true")) == 1
+    # absent column -> unchanged (append-only tables)
+    assert len(apply_current_state_filter(
+        pd.DataFrame({"id": [1, 2], "v": ["a", "b"]}), "is_current = true")) == 2

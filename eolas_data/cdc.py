@@ -80,6 +80,12 @@ def apply_current_state_filter(
     When the filter column is absent from the DataFrame (e.g. the dataset has
     no SCD2 history column) the filter is silently skipped — this keeps
     append-only tables (which have no is_current) working correctly.
+
+    Comparison is type-tolerant (and must stay in lockstep with the R client's
+    eolas_apply_current_state_filter): a boolean filter value matches the column
+    whether it is stored as boolean, "true"/"false" string, etc. — case-insensitive.
+    A plain ``df[col] == True`` would silently drop EVERY row if is_current were
+    ever served as a string (schema drift / a bad page), and would diverge from R.
     """
     parsed = _parse_current_state_filter(filter_expr)
     if parsed is None:
@@ -87,7 +93,11 @@ def apply_current_state_filter(
     col, val = parsed
     if col not in df.columns:
         return df
-    return df[df[col] == val].reset_index(drop=True)
+    if isinstance(val, bool):
+        keep = df[col].astype(str).str.lower() == str(val).lower()
+    else:
+        keep = df[col].astype(str) == str(val)
+    return df[keep].reset_index(drop=True)
 
 
 def merge_changes(
