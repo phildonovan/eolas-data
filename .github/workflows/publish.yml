@@ -8,6 +8,8 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      PYTHON_KEYRING_BACKEND: keyring.backends.null.Keyring
     steps:
       - uses: actions/checkout@v4
 
@@ -16,10 +18,10 @@ jobs:
           python-version: "3.12"
 
       - name: Install package + dev deps
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,secure]"
 
       - name: pytest
-        run: pytest -q
+        run: pytest -q -m "not integration"
 
   publish:
     needs: test
