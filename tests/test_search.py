@@ -55,3 +55,23 @@ def test_filter_datasets_plain_substring():
     ])
     out = filter_datasets(df, "cpi")
     assert list(out["name"]) == ["nz_cpi"]
+
+
+def test_filter_datasets_kapiti_alias():
+    df = pd.DataFrame([
+        {"name": "kcdc_flood_extents", "title": "Flood extents", "source": "Wellington Region Councils"},
+        {"name": "wcc_flood_hazard_operative", "title": "WCC floods", "source": "Wellington Region Councils"},
+        {"name": "nz_gdp", "title": "NZ GDP", "source": "OECD", "description": "kapiti mentioned in text"},
+    ])
+    out = filter_datasets(df, "kapiti")
+    assert set(out["name"]) == {"kcdc_flood_extents"}
+    assert "nz_gdp" not in set(out["name"])
+
+
+def test_filter_datasets_porirua_alias():
+    df = pd.DataFrame([
+        {"name": "pcc_district_plan_zones", "title": "District plan", "source": "Wellington Region Councils"},
+        {"name": "wcc_district_plan_zones_2024", "title": "WCC zones", "source": "Wellington Region Councils"},
+    ])
+    out = filter_datasets(df, "porirua")
+    assert list(out["name"]) == ["pcc_district_plan_zones"]

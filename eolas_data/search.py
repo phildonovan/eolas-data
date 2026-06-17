@@ -27,7 +27,19 @@ _SEARCH_ALIASES: dict[str, tuple[str, ...]] = {
         "inflation",
         "prices",
     ),
+    "kapiti": (
+        "kapiti",
+        "kcdc_",
+        "kapiti coast",
+    ),
+    "porirua": (
+        "porirua",
+        "pcc_",
+    ),
 }
+
+# Aliases that should match name/title only (skip description — too many false positives).
+_NAME_ONLY_ALIASES = frozenset({"hlfs", "kapiti", "porirua"})
 
 # Canonical CPI choices — nz_cpi is OECD YoY %, not a CPI index level.
 CPI_INDEX_DATASET = "rbnz_m1_prices"
@@ -101,7 +113,7 @@ def filter_datasets(
         else pd.Series("", index=out.index)
     )
     rank_key = (query or "").strip().lower()
-    search_desc = rank_key != "hlfs"
+    search_desc = rank_key not in _NAME_ONLY_ALIASES
     mask = pd.Series(False, index=out.index)
     for needle in needles:
         n = needle.lower()

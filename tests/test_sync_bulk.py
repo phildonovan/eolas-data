@@ -283,6 +283,19 @@ def test_sync_bulk_402_raises_and_no_sidecar(client, tmp_path):
 
 
 @resp_lib.activate
+def test_sync_bulk_bulk_export_none_raises_before_head(client, tmp_path):
+    """bulk_export_class=none raises BulkLicenceRestricted without hitting bulk HEAD."""
+    dest = tmp_path / "nz_cpi.parquet"
+    meta = {**BULK_DATASET_META, "bulk_export_class": "none"}
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi", json=meta, status=200)
+
+    with pytest.raises(BulkLicenceRestricted, match="bulk_export_class=none"):
+        client.sync_bulk("nz_cpi", path=dest)
+
+    assert not pathlib.Path(str(dest) + ".eolas-meta.json").exists()
+
+
+@resp_lib.activate
 def test_sync_bulk_403_licence_raises_and_no_sidecar(client, tmp_path):
     """HTTP 403 (licence) raises BulkLicenceRestricted; no sidecar created."""
     dest = tmp_path / "nz_cpi.parquet"

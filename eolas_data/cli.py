@@ -322,17 +322,23 @@ def get_cmd(
     except EolasError as e:
         _bail(str(e), _exit_for(e))
 
+    dest = out.expanduser().resolve() if out else None
     if fmt == "csv":
-        df.to_csv(out if out else sys.stdout, index=False)
+        df.to_csv(dest if dest else sys.stdout, index=False)
     elif fmt == "json":
         text = df.to_json(orient="records", date_format="iso")
-        if out:
-            out.write_text(text + "\n")
+        if dest:
+            dest.write_text(text + "\n")
         else:
             sys.stdout.write(text)
             sys.stdout.write("\n")
     elif fmt == "parquet":
-        df.to_parquet(out, index=False)
+        df.to_parquet(dest, index=False)
+
+    if dest:
+        Console(stderr=True).print(
+            f"[green]Wrote {len(df)} rows →[/green] {dest}"
+        )
 
 
 # ────────────────────────────────────────────────────────────────────────────

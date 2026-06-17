@@ -80,6 +80,18 @@ def test_list_unknown_source_returns_empty(client):
     assert result.empty
 
 
+@resp_lib.activate
+def test_list_wellington_filters_source(client):
+    datasets = [
+        {"name": "kcdc_flood_extents", "source": "Wellington Region Councils"},
+        {"name": "nz_cpi", "source": "OECD"},
+    ]
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets", json={"datasets": datasets})
+    result = client.list_wellington()
+    assert len(result) == 1
+    assert result.iloc[0]["name"] == "kcdc_flood_extents"
+
+
 # ---------------------------------------------------------------------------
 # info()
 # ---------------------------------------------------------------------------
@@ -188,6 +200,7 @@ def test_get_auto_converts_to_geodataframe(client):
     assert "geometry_wkt" not in df.columns
     assert df.crs.to_epsg() == 4326
     assert df.geometry.iloc[0].x == pytest.approx(174.78)
+    assert df.attrs.get("eolas_name") == "nz_addresses"
 
 
 @resp_lib.activate

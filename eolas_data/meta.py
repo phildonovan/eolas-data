@@ -48,13 +48,20 @@ def attach_meta(
     column_meta: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """Attach eolas metadata attrs to a DataFrame / Dataset / GeoDataFrame."""
-    try:
-        df.eolas_name = name
-        df.eolas_source = source
-        df.eolas_meta = table_meta or {}
-        df.eolas_columns = column_meta
-    except (AttributeError, TypeError):
-        pass
+    payload = {
+        "eolas_name": name,
+        "eolas_source": source,
+        "eolas_meta": table_meta or {},
+        "eolas_columns": column_meta,
+    }
+    attrs = getattr(df, "attrs", None)
+    if isinstance(attrs, dict):
+        attrs.update(payload)
+    for key, val in payload.items():
+        try:
+            setattr(df, key, val)
+        except (AttributeError, TypeError):
+            pass
     return df
 
 

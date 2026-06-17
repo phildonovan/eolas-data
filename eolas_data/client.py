@@ -145,12 +145,12 @@ def _to_geodataframe(df: "pd.DataFrame", force: bool = False):
 
     geom = df["geometry_wkt"].apply(lambda s: _wkt.loads(s) if isinstance(s, str) and s else None)
     gdf = gpd.GeoDataFrame(df.drop(columns=["geometry_wkt"]), geometry=geom, crs="EPSG:4326")
+    src_attrs = getattr(df, "attrs", None)
     for attr in ("eolas_name", "eolas_source", "eolas_meta", "eolas_columns"):
-        if hasattr(df, attr):
-            try:
-                setattr(gdf, attr, getattr(df, attr))
-            except Exception:
-                pass
+        if isinstance(src_attrs, dict) and attr in src_attrs:
+            gdf.attrs[attr] = src_attrs[attr]
+        elif hasattr(df, attr):
+            gdf.attrs[attr] = getattr(df, attr)
     return gdf
 
 
@@ -326,6 +326,16 @@ class Client:
         "geoparquet": ".geo.parquet",
     }
 
+    @staticmethod
+    def _require_bulk_export(meta: dict, name: Union[str, "DatasetName"]) -> None:
+        """Raise BulkLicenceRestricted when dataset metadata blocks bulk export."""
+        if (meta.get("bulk_export_class") or "").lower() == "none":
+            raise BulkLicenceRestricted(
+                f"{name!r} cannot be bulk-downloaded (bulk_export_class=none — "
+                "typically OECD/licence-restricted). Use get() or "
+                f"`eolas get {name}` for live API access instead."
+            )
+
     def download_bulk(
         self,
         name: Union[str, "DatasetName"],
@@ -415,6 +425,7 @@ class Client:
 
         # Resolve name → namespace + table via the datasets metadata endpoint.
         meta = self._get(f"/v1/datasets/{name}")
+        self._require_bulk_export(meta, name)
         namespace = meta.get("namespace") or ""
         table     = meta.get("table") or meta.get("name") or name
         if not namespace:
@@ -549,6 +560,7 @@ class Client:
 
         # Resolve name → namespace + table (needed to construct the bulk URL).
         meta = self._get(f"/v1/datasets/{name}")
+        self._require_bulk_export(meta, name)
         namespace = meta.get("namespace") or ""
         table     = meta.get("table") or meta.get("name") or name
         if not namespace:
@@ -1266,6 +1278,12 @@ class Client:
             # of "licence" in the server detail. A key-auth 403 goes to AuthenticationError.
             if detail and "licence" in detail.lower():
                 raise BulkLicenceRestricted(detail)
+            # Bulk HEAD often returns 403 with no JSON body (OECD/licence-blocked).
+            if not detail and "/bulk/" in (getattr(resp, "url", "") or ""):
+                raise BulkLicenceRestricted(
+                    "Bulk download is not permitted for this dataset. "
+                    "Use get() or `eolas get` for live API access instead."
+                )
             raise AuthenticationError(detail or "API key is inactive.")
         if resp.status_code == 503:
             try:
@@ -1691,6 +1709,10 @@ class Client:
             Source: https://www.gw.govt.nz
         """
         return self._get_source(name, "Wellington Region Councils", **kwargs)
+
+    def list_wellington(self) -> pd.DataFrame:
+        """Return metadata for all Wellington Region Councils datasets."""
+        return self.list(source="Wellington Region Councils")
 
     def west_coast(self, name, **kwargs) -> Dataset:
         """Fetch a West Coast (Te Tai o Poutini) dataset (faults, landslides, planning).

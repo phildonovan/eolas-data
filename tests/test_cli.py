@@ -203,6 +203,18 @@ def test_get_unknown_format_fails_with_usage_exit():
     assert result.exit_code == cli_module.EXIT_USAGE
 
 
+@resp_lib.activate
+def test_get_out_prints_success_message(tmp_path):
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi/data",
+                 json={"data": RECORDS}, status=200)
+    out = tmp_path / "cpi.csv"
+    result = runner.invoke(app, ["get", "nz_cpi", "--out", str(out), "--api-key", "k"])
+    assert result.exit_code == 0
+    assert out.exists()
+    assert "Wrote" in result.stderr and "rows" in result.stderr
+    assert str(out) in result.stderr
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # auth
 # ────────────────────────────────────────────────────────────────────────────
