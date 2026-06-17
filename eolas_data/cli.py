@@ -2,9 +2,8 @@
 
 Designed for two audiences:
 - Humans typing in a terminal: rich tables, sensible defaults, --help everywhere.
-- Shell scripts and AI agents: --json everywhere, auto-detect when stdout is
-  piped (drops to NDJSON automatically), distinct exit codes per error class,
-  stable output schemas.
+- Shell scripts and AI agents: pass ``--json`` for NDJSON, distinct exit codes
+  per error class, stable output schemas.
 
 The CLI is a thin layer over the existing `eolas_data.Client`. All HTTP, retry,
 auth, and error-mapping behaviour stays in the Python client — the CLI only
@@ -108,9 +107,7 @@ def _client(api_key: Optional[str] = None) -> Client:
 
 def _machine_mode(json_flag: bool) -> bool:
     """True when output should be machine-readable (NDJSON / CSV)."""
-    if json_flag:
-        return True
-    return not sys.stdout.isatty()
+    return json_flag
 
 
 def _emit_ndjson(records) -> None:
@@ -118,6 +115,35 @@ def _emit_ndjson(records) -> None:
     for r in records:
         sys.stdout.write(json.dumps(r, default=str, ensure_ascii=False))
         sys.stdout.write("\n")
+
+
+def _preview_display_frame(df, *, limit: int, max_cols: int = 8):
+    """Recent rows + a readable column subset for wide tables."""
+    import pandas as pd
+
+    out = df
+    if "date" in out.columns and len(out) > 0:
+        out = out.tail(limit).reset_index(drop=True)
+    cols = list(out.columns)
+    prefer = [
+        c for c in cols
+        if c == "date" or c == "value"
+        or "cpi_index" in c.lower() or c.lower().endswith("_ocr")
+        or "ocr" in c.lower()
+    ]
+    picked: list[str] = []
+    for c in prefer:
+        if c in cols and c not in picked:
+            picked.append(c)
+    for c in cols:
+        if len(picked) >= max_cols:
+            break
+        if c not in picked:
+            picked.append(c)
+    note = ""
+    if len(cols) > len(picked):
+        note = f" (showing {len(picked)} of {len(cols)} columns — use --json or get --format csv for all)"
+    return out[picked], note
 
 
 def _row_to_dict(row) -> dict:
@@ -182,30 +208,31 @@ def datasets_list(
 ) -> None:
     """List datasets, optionally filtered by source or search term."""
     try:
-        items = _client(api_key).list(source=source)
+        df = _client(api_key).list(source=source)
     except EolasError as e:
         _bail(str(e), _exit_for(e))
 
     if search:
-        needle = search.lower()
-        items = [
-            d for d in items
-            if needle in (str(d.get("name", "")) + str(d.get("title", ""))).lower()
-        ]
+        from .search import filter_datasets, maybe_cpi_guidance
+
+        df = filter_datasets(df, search, source=None)
+        note = maybe_cpi_guidance(search)
+        if note and not _machine_mode(json_out):
+            Console(stderr=True).print(f"[dim]{note}[/dim]")
 
     if _machine_mode(json_out):
-        _emit_ndjson(items)
+        _emit_ndjson(_row_to_dict(row) for _, row in df.iterrows())
         return
 
-    table = Table(title=f"{len(items)} dataset{'' if len(items) == 1 else 's'}")
+    table = Table(title=f"{len(df)} dataset{'' if len(df) == 1 else 's'}")
     table.add_column("name",   style="cyan",    no_wrap=True)
     table.add_column("source", style="magenta", no_wrap=True)
     table.add_column("title")
-    for d in items:
-        title = (d.get("title") or "")
+    for _, row in df.iterrows():
+        title = str(row.get("title") or "")
         if len(title) > 80:
             title = title[:77] + "..."
-        table.add_row(str(d.get("name", "")), str(d.get("source", "")), title)
+        table.add_row(str(row.get("name", "")), str(row.get("source", "")), title)
     Console().print(table)
 
 
@@ -243,7 +270,7 @@ def datasets_preview(
     json_out: bool          = typer.Option(False, "--json"),
     api_key:  Optional[str] = typer.Option(None, "--api-key"),
 ) -> None:
-    """Preview the first N rows of a dataset."""
+    """Preview the most recent N rows of a dataset."""
     try:
         df = _client(api_key).get(name, limit=limit)
     except EolasError as e:
@@ -253,7 +280,8 @@ def datasets_preview(
         _emit_ndjson(_row_to_dict(row) for _, row in df.iterrows())
         return
 
-    table = Table(title=f"{name} (showing {len(df)} rows)")
+    df, col_note = _preview_display_frame(df, limit=limit)
+    table = Table(title=f"{name} (most recent {len(df)} rows){col_note}")
     for col in df.columns:
         table.add_column(str(col))
     for _, row in df.iterrows():
@@ -912,6 +940,21 @@ def schedule_add(
         _bail("--cron and an interval flag are mutually exclusive", EXIT_USAGE)
     if not cron and not chosen_interval:
         chosen_interval = "daily"  # default
+
+    # ----- bulk-sync guard (OECD / licence-blocked datasets) ----------------
+    if not start and not end:
+        try:
+            meta = _client().info(name)
+            if (meta.get("bulk_export_class") or "").lower() == "none":
+                _bail(
+                    f"{name!r} cannot be bulk-synced (bulk_export_class=none — "
+                    "typically OECD/licence-restricted). Use "
+                    f"`eolas get {name} --out {out}` in cron instead, or pass "
+                    "--start/--end for a date-bounded get job.",
+                    EXIT_USAGE,
+                )
+        except EolasError:
+            pass  # let schedule install fail later if info lookup fails
 
     # ----- build the command line -----------------------------------------
     out_path = out.expanduser().resolve()

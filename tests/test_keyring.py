@@ -112,7 +112,8 @@ def test_client_keyring_correct_service_and_username(monkeypatch):
 def test_client_falls_through_when_keyring_missing(monkeypatch, tmp_path):
     """Missing keyring package does not crash Client(); falls through to empty key."""
     monkeypatch.delenv("EOLAS_API_KEY", raising=False)
-    with patch.dict("sys.modules", {"keyring": None}):
+    with patch.dict("sys.modules", {"keyring": None}), \
+         patch.object(client_module, "_config_file_get", return_value=""):
         c = Client()
     assert c._key == ""
 
@@ -241,7 +242,8 @@ def test_save_get_clear_round_trip(monkeypatch):
 
     with patch("keyring.set_password", side_effect=fake_set), \
          patch("keyring.get_password", side_effect=fake_get), \
-         patch("keyring.delete_password", side_effect=fake_delete):
+         patch("keyring.delete_password", side_effect=fake_delete), \
+         patch.object(client_module, "_config_file_get", return_value=""):
 
         # Save
         result = runner.invoke(app, ["auth", "save-key", FAKE_KEY])

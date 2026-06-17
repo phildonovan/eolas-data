@@ -259,6 +259,28 @@ def _set_up_key():
     runner.invoke(app, ["auth", "set-key", "--key", "fakekey"])
 
 
+def _mock_bulk_ok_client(monkeypatch):
+    class _MetaClient:
+        def info(self, name):
+            return {"name": name, "bulk_export_class": "parquet"}
+
+    monkeypatch.setattr(cli_module, "_client", lambda api_key=None: _MetaClient())
+
+
+def test_schedule_add_rejects_non_bulk_dataset(monkeypatch):
+    _set_up_key()
+
+    class _MetaClient:
+        def info(self, name):
+            return {"name": name, "bulk_export_class": "none"}
+
+    monkeypatch.setattr(cli_module, "_client", lambda api_key=None: _MetaClient())
+    result = runner.invoke(app, ["schedule", "add", "nz_cpi",
+                                 "--out", "/tmp/x.csv", "--dry-run"])
+    assert result.exit_code == cli_module.EXIT_USAGE
+    assert "bulk-synced" in result.stderr
+
+
 def test_schedule_add_requires_api_key():
     # No key configured → pre-flight fails with EXIT_USAGE.
     result = runner.invoke(app, ["schedule", "add", "nz_cpi", "--out", "/tmp/x.csv"])
@@ -266,8 +288,9 @@ def test_schedule_add_requires_api_key():
     assert "no API key" in result.stderr
 
 
-def test_schedule_add_dry_run_prints_without_calling_backend(tmp_path):
+def test_schedule_add_dry_run_prints_without_calling_backend(tmp_path, monkeypatch):
     _set_up_key()
+    _mock_bulk_ok_client(monkeypatch)
     out_file = tmp_path / "cpi.csv"
     result = runner.invoke(app, ["schedule", "add", "nz_cpi",
                                  "--out", str(out_file), "--dry-run"])
@@ -278,8 +301,9 @@ def test_schedule_add_dry_run_prints_without_calling_backend(tmp_path):
     assert "0 6 * * *" in result.stdout or "DAILY" in result.stdout
 
 
-def test_schedule_add_mutually_exclusive_intervals_rejected():
+def test_schedule_add_mutually_exclusive_intervals_rejected(monkeypatch):
     _set_up_key()
+    _mock_bulk_ok_client(monkeypatch)
     result = runner.invoke(app, ["schedule", "add", "nz_cpi",
                                  "--out", "/tmp/x.csv",
                                  "--daily", "--weekly", "--dry-run"])
@@ -287,8 +311,9 @@ def test_schedule_add_mutually_exclusive_intervals_rejected():
     assert "only one of" in result.stderr
 
 
-def test_schedule_add_cron_with_interval_rejected():
+def test_schedule_add_cron_with_interval_rejected(monkeypatch):
     _set_up_key()
+    _mock_bulk_ok_client(monkeypatch)
     result = runner.invoke(app, ["schedule", "add", "nz_cpi",
                                  "--out", "/tmp/x.csv",
                                  "--cron", "0 6 * * *", "--daily", "--dry-run"])
@@ -297,6 +322,7 @@ def test_schedule_add_cron_with_interval_rejected():
 
 def test_schedule_add_invalid_cron_rejected(monkeypatch):
     _set_up_key()
+    _mock_bulk_ok_client(monkeypatch)
     # Force POSIX path so --cron is accepted at all
     monkeypatch.setattr("eolas_data.schedule.is_windows", lambda: False)
     result = runner.invoke(app, ["schedule", "add", "nz_cpi",

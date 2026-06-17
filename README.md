@@ -15,17 +15,18 @@ from eolas_data import Client
 
 client = Client("your_api_key")   # or set EOLAS_API_KEY in env
 
-# Generic
-df = client.get("nz_cpi", start="2020-01-01")
+# CPI index (monthly, RBNZ M1) — the usual Treasury/analyst choice
+cpi = client.rbnz("rbnz_m1_prices", start="2020-01-01")
 
-# Source-specific (sets the `eolas_source` metadata)
-df = client.statsnz("nz_cpi")
-df = client.oecd("nz_gdp_growth")
+# OECD macro indicators (quarterly YoY % — not CPI index levels)
+inflation = client.oecd("nz_cpi", start="2020-01-01")
+gdp       = client.oecd("nz_gdp_growth")
 
 # Discovery
 all_datasets = client.list()
 nz_only      = client.list("Stats NZ")
-meta         = client.info("nz_cpi")
+client.search("cpi")   # expands aliases; surfaces rbnz_m1_prices before nz_cpi
+meta         = client.info("rbnz_m1_prices")
 ```
 
 Get an API key at <https://eolas.fyi/signup>. Free plan is 10 requests/month; Pro ($49/month) is unlimited.
@@ -58,7 +59,7 @@ Or set the env var instead (useful for CI / Docker):
 export EOLAS_LIBRARY=~/eolas-library
 ```
 
-After setting the library, `client.get_local("nz_parcels")` and the smart-routing in `client.get("nz_parcels")` will use `~/eolas-library/` automatically.
+After setting the library, `client.get_local("nz_parcels")` will use `~/eolas-library/` automatically.
 
 The keyring slot and config file are shared with the R `eolas` client — a key saved from Python is immediately readable from R and vice versa (see the [R client README](https://github.com/phildonovan/eolas-r)).
 
@@ -67,9 +68,8 @@ The keyring slot and config file are shared with the R `eolas` client — a key 
 ## Command-line interface
 
 `pip install eolas-data[cli]` adds an `eolas` command for browsing, fetching, and
-scheduling — useful for shell scripts, cron jobs, and AI-agent workflows. Output
-auto-detects piping: rich tables in a terminal, newline-delimited JSON when
-stdout is piped.
+scheduling — useful for shell scripts, cron jobs, and AI-agent workflows. Rich
+tables by default; pass ``--json`` for newline-delimited JSON in scripts.
 
 ```bash
 # one-time setup (OS keyring — recommended)
@@ -82,13 +82,14 @@ eolas health
 
 # discover
 eolas datasets list --source "Stats NZ"
+eolas datasets list --search cpi          # table + CPI guidance note
 eolas datasets list --search cpi --json | jq '.[].name'
-eolas datasets info nz_cpi
-eolas datasets preview nz_cpi --limit 5
+eolas datasets info rbnz_m1_prices
+eolas datasets preview rbnz_m1_prices --limit 5
 
 # fetch (verb matches the Python lib's client.get())
-eolas get nz_cpi --format csv > cpi.csv
-eolas get nz_cpi --start 2020-01-01 --format json | jq '.[].value'
+eolas get rbnz_m1_prices --format csv > cpi.csv
+eolas get nz_cpi --start 2020-01-01 --format json | jq '.[].value'   # OECD YoY %
 eolas get nz_meshblock_2023 --format parquet --out sa2.parquet
 ```
 
@@ -151,29 +152,21 @@ For a columnar file (CLI), use `--format parquet --out FILE`; via the REST
 API directly, `?format=parquet`. Full benchmark: [docs.eolas.fyi → Python
 reference → Performance](https://docs.eolas.fyi/python/reference/).
 
-## Bulk downloads — `client.get()` is now smart
+## Bulk downloads — use `get_local()` for whole datasets
 
-`client.get()` auto-routes large or geospatial datasets through the cache+sync path — no code change needed. `client.linz("nz_parcels")` used to take 15 minutes (live Iceberg scan through the row-oriented endpoint); it now returns a GeoDataFrame in seconds.
+`client.get()` hits the live `/data` endpoint (good for slices and small pulls). For whole datasets — especially large or geospatial layers — use `get_local()`. It syncs a CDN-cached Parquet/GeoParquet file to your library directory and reads from disk on subsequent calls.
 
 ```python
-# Smart default: nz_parcels auto-routes to CDN-cached GeoParquet, no limit needed
-gdf = client.linz("nz_parcels")   # geopandas.GeoDataFrame in seconds
-df  = client.get("nz_cpi")        # small dataset → stays on live path
+# Whole-dataset path: nz_parcels from CDN-cached GeoParquet (seconds, not a 15-min Iceberg scan)
+gdf = client.get_local("nz_parcels")   # geopandas.GeoDataFrame when [geo] is installed
+df  = client.get_local("nz_cpi")       # tidy DataFrame from cached Parquet
 
-# Escape hatches when you need explicit control:
-gdf = client.get("nz_parcels", mode="live")      # force live Iceberg scan (server returns 413
-                                                  # if dataset is large/geo and no filter is set
-                                                  # — apply limit=/start=/end= or use mode="cached")
-gdf = client.get("nz_parcels", mode="cached")    # force cache+sync (= get_local)
+# Live path: date slices, row limits, licence-restricted sources (e.g. OECD)
+df  = client.get("nz_cpi", start="2020-01-01")
+df  = client.get("nz_cpi", limit=100)
 ```
 
-**Routing rules (mode="auto", the default):**
-1. If `start=`, `end=`, or `limit=` is set → always live (slice queries can't use a whole-file cache).
-2. If the dataset is licence-restricted (`bulk_export_class="none"`, e.g. OECD) → always live.
-3. If bulk-eligible AND (has geometry OR >100k rows) → cache+sync path.
-4. Otherwise → live.
-
-`get_local()` is the explicit alias for `mode="cached"` — use it when you need to control `cache_dir`, `format`, or `freshness`:
+Use `get_local()` when you need to control `cache_dir`, `format`, or `freshness`:
 
 ```python
 # Explicit cache+sync with extra options
@@ -190,7 +183,7 @@ r    = client.sync_bulk("nz_cpi", path="nz_cpi.parquet")
 path = client.download_bulk("treasury_fiscal_spending", path="t.parquet")
 ```
 
-**Progress bars:** `download_bulk`, `sync_bulk`, `get_local`, and the smart-routing path in `get()` all show a `tqdm` progress bar automatically in interactive terminals and VSCode notebooks, so 1+ GB files are never silent. Pass `progress=False` to suppress in scripts, or set `EOLAS_NO_PROGRESS=1` in the environment for a CI-wide escape hatch. The `--no-progress` flag does the same from the CLI.
+**Progress bars:** `download_bulk`, `sync_bulk`, and `get_local` all show a `tqdm` progress bar automatically in interactive terminals and VSCode notebooks, so 1+ GB files are never silent. Pass `progress=False` to suppress in scripts, or set `EOLAS_NO_PROGRESS=1` in the environment for a CI-wide escape hatch. The `--no-progress` flag does the same from the CLI.
 
 CLI mirror: `eolas download <name>` for one-shot, `eolas sync <name> [--watch hourly]` for an incremental check. Full docs: [docs.eolas.fyi/bulk-downloads/](https://docs.eolas.fyi/bulk-downloads/).
 
@@ -264,6 +257,18 @@ client.get("nz_")    # autocomplete shows nz_cpi, nz_gdp_growth, ...
 ```
 
 The list is regenerated from the live API at release time. Passing a name not in the snapshot still works at runtime — the type hint just won't autocomplete it. Catalog snapshot date is exposed as `eolas_data._dataset_names.CATALOG_SNAPSHOT_DATE`.
+
+## Testing
+
+```bash
+# unit tests (mocked HTTP — no API key needed)
+pytest -q -m "not integration"
+
+# live smoke (requires EOLAS_API_KEY)
+EOLAS_API_KEY=vs_... pytest -q -m integration tests/test_smoke_live.py
+```
+
+CI runs the unit suite on Python 3.10, 3.12, and 3.13 on every push/PR. A weekly workflow optionally runs live smoke tests when `EOLAS_API_KEY` is configured as a repository secret.
 
 ## Releasing
 

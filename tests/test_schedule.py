@@ -71,9 +71,18 @@ def test_validate_cron_expr_bad_field_count():
 
 def test_build_command_basic():
     cmd = sched.build_command("/usr/local/bin/eolas", "nz_cpi", "/tmp/cpi.csv")
-    assert cmd.startswith("/usr/local/bin/eolas get nz_cpi")
+    assert cmd.startswith("/usr/local/bin/eolas sync nz_cpi")
     assert "--format csv" in cmd
     assert "--out /tmp/cpi.csv" in cmd
+    assert "--no-progress" in cmd
+
+
+def test_build_command_date_window_uses_get():
+    cmd = sched.build_command("/bin/eolas", "nz_cpi", "/tmp/o.csv",
+                              start="2020-01-01")
+    assert " get " in cmd
+    assert "--start 2020-01-01" in cmd
+    assert "--no-progress" not in cmd
 
 
 def test_build_command_quotes_paths_with_spaces():

@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+from typing import Optional
+
 import pandas as pd
+
+from .meta import column_label as _column_label
+from .meta import meta_subtitle
 
 
 class Dataset(pd.DataFrame):
@@ -8,15 +13,21 @@ class Dataset(pd.DataFrame):
 
     Behaves exactly like a DataFrame — all pandas operations work normally.
     Extra attributes:
-        eolas_name:   Dataset identifier (e.g. ``"nz_cpi"``).
-        eolas_source: Data source label (e.g. ``"Stats NZ"``).
+        eolas_name:    Dataset identifier (e.g. ``"nz_cpi"``).
+        eolas_source:  Data source label (e.g. ``"Stats NZ"``).
+        eolas_meta:    Table metadata dict from ``GET /v1/datasets/{name}``.
+        eolas_columns: Per-column glossary (``name``, ``type``, ``description``, …).
     """
 
-    _metadata = ["eolas_name", "eolas_source"]
+    _metadata = ["eolas_name", "eolas_source", "eolas_meta", "eolas_columns"]
 
     @property
     def _constructor(self):
         return Dataset
+
+    def column_label(self, column: str) -> Optional[str]:
+        """Human-readable description for a column, or ``None`` if unknown."""
+        return _column_label(getattr(self, "eolas_columns", None), column)
 
     def __repr__(self) -> str:
         name   = getattr(self, "eolas_name",   "") or ""
@@ -25,6 +36,9 @@ class Dataset(pd.DataFrame):
             header = f"# Dataset: {name}"
             if source:
                 header += f" [{source}]"
+            subtitle = meta_subtitle(getattr(self, "eolas_meta", None) or {})
+            if subtitle:
+                header += f"\n# {subtitle}"
             header += f"\n# {len(self)} rows\n"
             return header + pd.DataFrame.__repr__(self)
         return pd.DataFrame.__repr__(self)

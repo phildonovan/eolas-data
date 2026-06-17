@@ -247,12 +247,23 @@ def _windows_list() -> list[ScheduleEntry]:
 def build_command(eolas_path: str, dataset: str, out_path: str,
                   start: Optional[str] = None, end: Optional[str] = None,
                   fmt: str = "csv") -> str:
-    """Construct the shell command line to put inside the cron entry."""
-    parts = [shlex.quote(eolas_path), "get", shlex.quote(dataset),
-             "--format", shlex.quote(fmt),
-             "--out", shlex.quote(str(out_path))]
-    if start:
-        parts += ["--start", shlex.quote(start)]
-    if end:
-        parts += ["--end", shlex.quote(end)]
+    """Construct the shell command line to put inside the cron entry.
+
+    Full-dataset refreshes use ``sync`` (HEAD check, skip unchanged snapshots).
+    Date-bounded pulls fall back to ``get`` because bulk sync has no window args.
+    """
+    parts = [shlex.quote(eolas_path)]
+    if start or end:
+        parts += ["get", shlex.quote(dataset),
+                  "--format", shlex.quote(fmt),
+                  "--out", shlex.quote(str(out_path))]
+        if start:
+            parts += ["--start", shlex.quote(start)]
+        if end:
+            parts += ["--end", shlex.quote(end)]
+    else:
+        parts += ["sync", shlex.quote(dataset),
+                  "--format", shlex.quote(fmt),
+                  "--out", shlex.quote(str(out_path)),
+                  "--no-progress"]
     return " ".join(parts)

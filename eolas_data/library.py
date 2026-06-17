@@ -23,18 +23,9 @@ import pathlib
 import sys
 from typing import Optional
 
-from rich.console import Console
 from rich.prompt import Prompt
-from rich.theme import Theme
 
-# Single shared console — writes to stderr so library status doesn't pollute
-# stdout (where JSON/data output goes from CLI commands). Custom theme styles
-# (`path`, `key`) are used for inline emphasis without leaking ansi codes
-# to non-tty consumers.
-_console = Console(
-    stderr=True,
-    theme=Theme({"path": "cyan", "key": "bold yellow"}),
-)
+from .console import console as _console
 
 _log = logging.getLogger("eolas_data")
 

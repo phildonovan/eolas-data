@@ -1,0 +1,29 @@
+name: Live API smoke
+
+on:
+  schedule:
+    - cron: "0 8 * * 1"  # Mondays 08:00 UTC
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package + dev deps
+        run: pip install -e ".[dev]"
+
+      - name: Live smoke tests
+        env:
+          EOLAS_API_KEY: ${{ secrets.EOLAS_API_KEY }}
+        run: |
+          if [ -z "$EOLAS_API_KEY" ]; then
+            echo "EOLAS_API_KEY secret not configured — skipping smoke tests."
+            exit 0
+          fi
+          pytest -q -m integration tests/test_smoke_live.py

@@ -12,8 +12,10 @@ from typing import Optional, Union
 import pandas as pd
 import requests
 
+from .console import nag_json_transport_once
 from .dataset import Dataset
 from .library import resolve_library_dir
+from .meta import attach_meta, split_meta
 from .exceptions import (
     APIError,
     AuthenticationError,
@@ -143,7 +145,7 @@ def _to_geodataframe(df: "pd.DataFrame", force: bool = False):
 
     geom = df["geometry_wkt"].apply(lambda s: _wkt.loads(s) if isinstance(s, str) and s else None)
     gdf = gpd.GeoDataFrame(df.drop(columns=["geometry_wkt"]), geometry=geom, crs="EPSG:4326")
-    for attr in ("eolas_name", "eolas_source"):
+    for attr in ("eolas_name", "eolas_source", "eolas_meta", "eolas_columns"):
         if hasattr(df, attr):
             try:
                 setattr(gdf, attr, getattr(df, attr))
@@ -169,11 +171,11 @@ class Client:
         client = Client("your_api_key")
 
         # Source-specific helpers
-        df = client.statsnz("nz_cpi", start="2020-01-01")
-        df = client.oecd("nz_gdp")
+        cpi = client.rbnz("rbnz_m1_prices", start="2020-01-01")
+        df  = client.oecd("nz_cpi", start="2020-01-01")   # OECD YoY %, not index
 
         # Generic
-        df = client.get("nz_cpi")
+        df = client.get("nz_gdp_growth")
 
         # Discovery
         all_datasets = client.list()
@@ -216,6 +218,7 @@ class Client:
         # (old server — go straight to JSON, don't waste a round-trip retrying
         # every call).
         self._arrow_supported: Optional[bool] = None
+        self._meta_cache: dict[str, dict] = {}
 
     def __repr__(self) -> str:
         masked = self._key[:8] + "..." if len(self._key) > 8 else self._key
@@ -226,7 +229,7 @@ class Client:
     # Discovery
     # ------------------------------------------------------------------
 
-    def list(self, source: Optional[str] = None) -> list[dict]:
+    def list(self, source: Optional[str] = None) -> pd.DataFrame:
         """Return metadata for all available datasets.
 
         Args:
@@ -234,13 +237,53 @@ class Client:
         """
         data = self._get("/v1/datasets")
         items = data.get("datasets", data) if isinstance(data, dict) else data
-        if source:
-            items = [s for s in items if s.get("source") == source]
-        return items
+        df = pd.DataFrame(items)
+        if source and not df.empty:
+            df = df[df["source"] == source].reset_index(drop=True)
+        return df
+
+    def search(self, query: str, source: Optional[str] = None) -> pd.DataFrame:
+        """Search datasets by name, title, or description.
+
+        Common aliases are expanded (e.g. ``"HLFS"`` → labour-force datasets,
+        ``"OCR"`` → official cash rate series).
+        """
+        from .search import filter_datasets
+
+        return filter_datasets(self.list(), query, source=source)
 
     def info(self, name: Union[str, "DatasetName"]) -> dict:
         """Return metadata for a single dataset."""
         return self._get(f"/v1/datasets/{name}")
+
+    def _info_cached(self, name: Union[str, "DatasetName"]) -> dict:
+        key = str(name)
+        if key not in self._meta_cache:
+            self._meta_cache[key] = self.info(name)
+        return self._meta_cache[key]
+
+    def _attach_dataset_meta(
+        self,
+        result: "pd.DataFrame",
+        name: Union[str, "DatasetName"],
+        *,
+        source: str = "",
+        meta: bool = True,
+    ) -> "pd.DataFrame":
+        table_meta: dict = {}
+        column_meta = None
+        if meta:
+            try:
+                table_meta, column_meta = split_meta(self._info_cached(name))
+            except Exception:
+                pass
+        return attach_meta(
+            result,
+            name=str(name),
+            source=source,
+            table_meta=table_meta,
+            column_meta=column_meta,
+        )
 
     # ------------------------------------------------------------------
     # Integrations (Enterprise plan only)
@@ -1638,7 +1681,7 @@ class Client:
 
             client.wellington("wcc_district_plan_zones_2024")
             client.wellington("wcc_flood_hazard_operative")
-            client.wellington("gwrc_flood_hazard_extents")
+            client.wellington("gwrc_flood_1pct_aep")
 
         Notes:
             Open data from Greater Wellington Regional Council and its
@@ -1675,7 +1718,28 @@ class Client:
             result.eolas_source = source
         except (AttributeError, TypeError):
             pass
+        self._warn_source_mismatch(name, source, result)
         return result
+
+    @staticmethod
+    def _warn_source_mismatch(name: str, expected_source: str, result) -> None:
+        meta = getattr(result, "eolas_meta", None) or {}
+        actual = (meta.get("source") or "").strip()
+        if not actual or actual == expected_source:
+            return
+        from .console import console
+        from .search import CPI_INDEX_DATASET, cpi_guidance_message
+
+        console.print(
+            f"[yellow]Warning:[/yellow] {name!r} is sourced from {actual!r}, "
+            f"not {expected_source!r}. See client.info({name!r}) for canonical metadata."
+        )
+        if expected_source == "Stats NZ" and str(name) == "nz_cpi":
+            console.print(f"[dim]{cpi_guidance_message()}[/dim]")
+        elif str(name) == "nz_cpi" and expected_source == "OECD":
+            console.print(
+                f"[dim]For CPI index levels use {CPI_INDEX_DATASET!r} (RBNZ).[/dim]"
+            )
 
     # ------------------------------------------------------------------
     # Bulk-cache convenience read (mirrors R eolas_get_local)
@@ -1690,6 +1754,7 @@ class Client:
         freshness: str = "auto",
         as_geo: Optional[bool] = None,
         as_arrow: bool = False,
+        meta: bool = True,
         progress: Optional[bool] = None,
     ) -> "pd.DataFrame":
         """Download (or serve from cache) a whole dataset as a local DataFrame.
@@ -1724,6 +1789,9 @@ class Client:
             as_arrow: When ``True``, return a ``pyarrow.Table`` directly (no
                 geometry materialisation). Cannot be combined with
                 ``as_geo=True`` (raises ``ValueError``).
+            meta: When ``True`` (default), attach table/column metadata from
+                :meth:`info` (session-cached). Pass ``False`` to skip the extra
+                round-trip.
             progress: Forwarded to :meth:`sync_bulk` (``None`` auto-detects TTY).
 
         Returns:
@@ -1756,14 +1824,19 @@ class Client:
         cache_path.mkdir(parents=True, exist_ok=True)
 
         # ---- auto-detect format if not specified -----------------------------
+        info_meta: Optional[dict] = None
+        if format is None or meta:
+            try:
+                info_meta = self._info_cached(name) if meta else self.info(name)
+            except Exception:
+                info_meta = None
         if format is None:
             try:
-                meta = self.info(name)
-                gt = meta.get("geometry_type")
-                wkt = meta.get("geometry_wkt")
+                gt = (info_meta or {}).get("geometry_type")
+                wkt = (info_meta or {}).get("geometry_wkt")
                 gt_truthy = bool(gt) and gt != "none"
                 wkt_truthy = bool(wkt) and wkt != "none"
-                is_geo = gt_truthy or wkt_truthy or bool(meta.get("has_geometry"))
+                is_geo = gt_truthy or wkt_truthy or bool((info_meta or {}).get("has_geometry"))
             except Exception:
                 is_geo = False
             fmt = "geoparquet" if is_geo else "parquet"
@@ -1794,14 +1867,18 @@ class Client:
             if resolved_as_geo:
                 try:
                     import geopandas as gpd
-                    return gpd.read_parquet(file_path)
+                    result = gpd.read_parquet(file_path)
+                    return self._attach_dataset_meta(result, name, meta=meta)
                 except ImportError:
                     pass
-            return pd.read_parquet(file_path)
+            result = pd.read_parquet(file_path)
+            return self._attach_dataset_meta(result, name, meta=meta)
         elif fmt == "csv_gz":
-            return pd.read_csv(file_path)  # pandas handles .gz automatically
+            result = pd.read_csv(file_path)
+            return self._attach_dataset_meta(result, name, meta=meta)
         else:  # parquet
-            return pd.read_parquet(file_path)
+            result = pd.read_parquet(file_path)
+            return self._attach_dataset_meta(result, name, meta=meta)
 
     # ------------------------------------------------------------------
     # Core data fetch
@@ -1817,6 +1894,7 @@ class Client:
         limit: Optional[int] = None,
         as_geo: Optional[bool] = None,
         as_arrow: bool = False,
+        meta: bool = True,
     ) -> Dataset:
         """Fetch dataset rows as a pandas (or polars / geopandas) DataFrame.
 
@@ -1834,7 +1912,8 @@ class Client:
             engine: ``"pandas"`` (default) or ``"polars"``.
             limit:  Max rows to return. Default ``None`` requests the full dataset
                     (server enforces a 50,000-row cap on Free/Starter plans; Pro is
-                    unlimited). Pass an explicit integer to request fewer rows.
+                    unlimited). When set with a ``date`` column, returns the
+                    **most recent** N rows (not the oldest).
             as_geo: Convert geospatial datasets to a ``GeoDataFrame``.
                     ``None`` (default) auto-converts when the dataset has a
                     ``geometry_wkt`` column AND ``geopandas`` is importable.
@@ -1850,6 +1929,9 @@ class Client:
                     via ``pa.Table.from_pandas``.
                     Cannot be combined with ``as_geo=True`` (raises
                     ``ValueError``).
+            meta: When ``True`` (default), attach table/column metadata from
+                    :meth:`info` (session-cached on this client). Pass
+                    ``False`` to skip the extra round-trip.
 
         Returns:
             A :class:`Dataset` (pandas DataFrame subclass), a polars DataFrame
@@ -1884,11 +1966,12 @@ class Client:
             params["start"] = start
         if end:
             params["end"] = end
-        # Server-side: limit=0 means "as much as the plan allows" (full dataset for Pro,
-        # 50K cap for Free/Starter). limit=None on the client maps to limit=0.
-        params["limit"] = 0 if limit is None else int(limit)
+        from .rows import apply_row_limit, resolve_fetch_limit, sort_by_date
 
-        cache_key = f"{name}:{start}:{end}:{format}:{params['limit']}:{as_geo}"
+        fetch_limit, user_limit = resolve_fetch_limit(limit)
+        params["limit"] = fetch_limit
+
+        cache_key = f"{name}:{start}:{end}:{format}:{0 if limit is None else int(limit)}:{as_geo}"
         if self._cache is not None and cache_key in self._cache:
             return self._cache[cache_key]
 
@@ -1901,10 +1984,8 @@ class Client:
             if "date" in df.columns:
                 df["date"] = pd.to_datetime(df["date"])
 
-        # API streams from Iceberg in file order, not chronological — sort here so
-        # callers can `df.plot(x="date", y="value")` without seeing zigzag lines.
-        if "date" in df.columns:
-            df = df.sort_values("date", kind="stable").reset_index(drop=True)
+        df = sort_by_date(df)
+        df = apply_row_limit(df, user_limit)
 
         # as_arrow on the live path: convert the pandas DataFrame to an Arrow
         # Table, avoiding any shapely allocation.  We convert before the
@@ -1917,8 +1998,7 @@ class Client:
             return tbl
 
         result = Dataset(df)
-        result.eolas_name   = name
-        result.eolas_source = ""
+        result = self._attach_dataset_meta(result, name, meta=meta)
 
         if engine == "polars":
             try:
@@ -1969,8 +2049,10 @@ class Client:
                 # Old server ignored format=arrow and returned JSON. Remember
                 # so we don't pay the failed round-trip on every future call.
                 self._arrow_supported = False
+                nag_json_transport_once()
             except Exception:
                 self._arrow_supported = False
+                nag_json_transport_once()
 
         data = self._get(f"/v1/datasets/{name}/data", params=params)
         records = data.get("data", data) if isinstance(data, dict) else data

@@ -60,6 +60,7 @@ def test_cached_client_repr(cached_client):
 def test_list_returns_all_datasets(client):
     resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets", json={"datasets": DATASET_LIST})
     result = client.list()
+    assert isinstance(result, pd.DataFrame)
     assert len(result) == 3
 
 
@@ -68,14 +69,15 @@ def test_list_filters_by_source(client):
     resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets", json={"datasets": DATASET_LIST})
     result = client.list("Stats NZ")
     assert len(result) == 1
-    assert result[0]["name"] == "nz_cpi"
+    assert result.iloc[0]["name"] == "nz_cpi"
 
 
 @resp_lib.activate
 def test_list_unknown_source_returns_empty(client):
     resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets", json={"datasets": DATASET_LIST})
     result = client.list("Unknown")
-    assert result == []
+    assert isinstance(result, pd.DataFrame)
+    assert result.empty
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +124,26 @@ def test_get_sorts_rows_by_date(client):
     resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi/data", json={"data": unsorted})
     df = client.get("nz_cpi")
     assert list(df["date"].dt.strftime("%Y-%m-%d")) == ["2022-01-01", "2023-01-01", "2023-04-01"]
+
+
+@resp_lib.activate
+def test_get_limit_returns_most_recent(client):
+    records = [
+        {"date": "2018-01-01", "value": 1.0},
+        {"date": "2020-01-01", "value": 2.0},
+        {"date": "2024-01-01", "value": 3.0},
+        {"date": "2025-01-01", "value": 4.0},
+    ]
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi/data", json={"data": records})
+    df = client.get("nz_cpi", limit=2)
+    assert list(df["date"].dt.strftime("%Y-%m-%d")) == ["2024-01-01", "2025-01-01"]
+
+
+@resp_lib.activate
+def test_get_limit_requests_full_window_from_server(client):
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi/data", json={"data": RECORDS})
+    client.get("nz_cpi", limit=2)
+    assert "limit=0" in resp_lib.calls[0].request.url
 
 
 @resp_lib.activate
