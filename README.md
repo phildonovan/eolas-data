@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/eolas-data)](https://pypi.org/project/eolas-data/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Python client for the [eolas.fyi](https://eolas.fyi) statistical data API — 1,400+ official New Zealand statistical & geospatial datasets, plus OECD data for international comparisons, served as tidy `pandas` DataFrames (or `polars` / `geopandas` if you prefer).
+Python client for the [eolas.fyi](https://eolas.fyi) statistical data API — 1,500+ official New Zealand statistical & geospatial datasets, plus OECD data for international comparisons, served as tidy `pandas` DataFrames (or `polars` / `geopandas` if you prefer).
 
 _Coverage is New Zealand + OECD today. Australian sources are on the roadmap — not yet available; OECD data already includes Australia (and other OECD members) for cross-country comparisons._
 
@@ -73,7 +73,7 @@ The keyring slot and config file are shared with the R `eolas` client — a key 
 
 ## Command-line interface
 
-`pip install eolas-data[cli]` adds an `eolas` command for browsing, fetching, and
+`pip install eolas-data` includes the `eolas` CLI for browsing, fetching, and
 scheduling — useful for shell scripts, cron jobs, and AI-agent workflows. Rich
 tables by default; pass ``--json`` for newline-delimited JSON in scripts.
 
@@ -193,6 +193,30 @@ path = client.download_bulk("treasury_fiscal_spending", path="t.parquet")
 
 CLI mirror: `eolas download <name>` for one-shot, `eolas sync <name> [--watch hourly]` for an incremental check. Full docs: [docs.eolas.fyi/bulk-downloads/](https://docs.eolas.fyi/bulk-downloads/).
 
+## Sync — always-fresh local copy
+
+`client.sync(name, path)` keeps a local file current, automatically choosing *how* based on the dataset's CDC serving tier — you make the same call either way:
+
+- **snapshot-tier** datasets → full-snapshot download, re-fetched only when the server snapshot changes (`sync_bulk()`).
+- **changelog-tier** datasets (e.g. the LINZ SCD2 layers) → incremental: the first call downloads a baseline, then later calls fetch *only what changed* from the `/changes` feed and pk-merge it into your file (`sync_changes()`).
+
+```python
+# Same call regardless of tier:
+r = client.sync("nz_building_outlines", path="buildings.parquet")
+r.status        # "downloaded" (baseline) | "updated" | "unchanged"
+r.sync_mode     # "changelog" for changelog-tier datasets
+r.ops_applied   # number of change rows applied this run
+r.current_seq   # feed watermark after this sync
+
+# First call baselines; subsequent calls apply only new changes:
+r = client.sync("nz_building_outlines", path="buildings.parquet")
+r.ops_applied   # e.g. 1240
+```
+
+A sidecar at `str(path) + ".eolas-meta.json"` records the snapshot id / feed watermark so the next call fetches only new data. For SCD2 datasets the merge keeps only the current rows (`is_current = true`), so `buildings.parquet` is always a clean current-state snapshot — the SCD2 history is handled for you. A `410` (watermark expired) self-heals by re-baselining.
+
+The changelog sidecar (`schema_version` 2) is byte-compatible with the R `eolas` client: a file synced from Python can be resumed from R and vice versa.
+
 ## Geospatial
 
 Datasets with a `geometry_wkt` column auto-convert to `geopandas.GeoDataFrame` if `geopandas` is installed:
@@ -284,4 +308,5 @@ Before each release: `python -m eolas_data._regen_names` to refresh the dataset 
 
 ## License
 
-MIT
+MIT — applies to this client software only. Dataset use is subject to each
+source's licence and your [eolas API plan](https://eolas.fyi/#pricing).
