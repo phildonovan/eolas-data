@@ -96,5 +96,8 @@ jobs:
       - name: Build
         run: python -m build
 
-      - name: Publish to PyPI (trusted publishing)
+      - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Uses PYPI_API_TOKEN when set; otherwise OIDC trusted publishing.
+          password: ${{ secrets.PYPI_API_TOKEN }}
