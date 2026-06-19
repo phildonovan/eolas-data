@@ -1,5 +1,11 @@
 # eolas-data
 
+[![Tests](https://github.com/phildonovan/eolas-data/actions/workflows/test.yml/badge.svg)](https://github.com/phildonovan/eolas-data/actions/workflows/test.yml)
+[![codecov](https://codecov.io/gh/phildonovan/eolas-data/graph/badge.svg)](https://codecov.io/gh/phildonovan/eolas-data)
+[![PyPI](https://img.shields.io/pypi/v/eolas-data)](https://pypi.org/project/eolas-data/)
+[![Python](https://img.shields.io/pypi/pyversions/eolas-data)](https://pypi.org/project/eolas-data/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 Python client for the [eolas.fyi](https://eolas.fyi) statistical data API — 1,400+ official New Zealand statistical & geospatial datasets, plus OECD data for international comparisons, served as tidy `pandas` DataFrames (or `polars` / `geopandas` if you prefer).
 
 _Coverage is New Zealand + OECD today. Australian sources are on the roadmap — not yet available; OECD data already includes Australia (and other OECD members) for cross-country comparisons._
@@ -268,7 +274,7 @@ pytest -q -m "not integration"
 EOLAS_API_KEY=vs_... pytest -q -m integration tests/test_smoke_live.py
 ```
 
-CI runs the unit suite on Python 3.10, 3.12, and 3.13 on every push/PR. A weekly workflow optionally runs live smoke tests when `EOLAS_API_KEY` is configured as a repository secret.
+CI runs the unit suite on Python 3.10, 3.12, and 3.13 on every push/PR, with [coverage](https://codecov.io/gh/phildonovan/eolas-data) uploaded to Codecov. A weekly workflow optionally runs live smoke tests when `EOLAS_API_KEY` is configured as a repository secret.
 
 ## Releasing
 
