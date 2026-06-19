@@ -1,0 +1,50 @@
+name: Pre-release gate
+
+on:
+  workflow_dispatch:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    env:
+      PYTHON_KEYRING_BACKEND: keyring.backends.null.Keyring
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Client contract matrix
+        run: python scripts/check_client_contract.py
+
+      - name: Build + install wheel
+        run: |
+          pip install build
+          python -m build
+          WHL=$(ls -1 dist/*.whl | head -1)
+          pip install "$WHL"
+          pip install pytest responses geopandas shapely pandas pyarrow typer rich keyring
+
+      - name: Unit tests (installed package)
+        run: pytest -q -m "not integration"
+
+      - name: Live smoke
+        env:
+          EOLAS_API_KEY: ${{ secrets.EOLAS_API_KEY }}
+        run: |
+          if [ -z "$EOLAS_API_KEY" ]; then
+            echo "::error::EOLAS_API_KEY secret required for pre-release smoke."
+            exit 1
+          fi
+          pytest -q -m integration tests/test_smoke_live.py
+
+      - name: Version parity with eolas-r
+        run: |
+          set -euo pipefail
+          py_ver=$(grep -E '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
+          r_ver=$(curl -fsSL "https://raw.githubusercontent.com/phildonovan/eolas-r/master/DESCRIPTION" \
+            | awk -F': ' '/^Version:/{print $2; exit}')
+          echo "Python: $py_ver | R (master): $r_ver"
+          if [ "$py_ver" != "$r_ver" ]; then
+            echo "::warning::Client versions differ — bump both before tagging if shipping related fixes"
+          fi

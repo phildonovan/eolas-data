@@ -15,6 +15,16 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Require API key on manual runs
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          EOLAS_API_KEY: ${{ secrets.EOLAS_API_KEY }}
+        run: |
+          if [ -z "$EOLAS_API_KEY" ]; then
+            echo "::error::EOLAS_API_KEY secret is required for workflow_dispatch smoke runs."
+            exit 1
+          fi
+
       - name: Install package + dev/geo deps (as users would)
         run: pip install ".[dev,geo]"
 
@@ -23,7 +33,7 @@ jobs:
           EOLAS_API_KEY: ${{ secrets.EOLAS_API_KEY }}
         run: |
           if [ -z "$EOLAS_API_KEY" ]; then
-            echo "EOLAS_API_KEY secret not configured — skipping smoke tests."
+            echo "EOLAS_API_KEY secret not configured — skipping scheduled smoke tests."
             exit 0
           fi
           pytest -q -m integration tests/test_smoke_live.py

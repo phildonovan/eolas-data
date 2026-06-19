@@ -6,8 +6,19 @@ on:
   pull_request:
 
 jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Client contract matrix
+        run: python scripts/check_client_contract.py
+
   test:
     runs-on: ubuntu-latest
+    needs: contract
     strategy:
       fail-fast: false
       matrix:
@@ -21,14 +32,39 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install package + dev + secure (install-tests the keyring extra)
-        run: pip install -e ".[dev,secure]"
+      - name: Install package + dev + geo + secure (editable)
+        run: pip install -e ".[dev,geo,secure]"
 
       - name: pytest (unit suite)
         run: pytest -q -m "not integration"
 
+  test-installed:
+    runs-on: ubuntu-latest
+    needs: contract
+    env:
+      PYTHON_KEYRING_BACKEND: keyring.backends.null.Keyring
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build wheel
+        run: pip install build && python -m build
+
+      - name: Install built wheel + test deps (as users would)
+        run: |
+          WHL=$(ls -1 dist/*.whl | head -1)
+          pip install "$WHL"
+          pip install pytest responses geopandas shapely pandas pyarrow typer rich keyring
+
+      - name: pytest on installed package
+        run: pytest -q -m "not integration"
+
   coverage:
     runs-on: ubuntu-latest
+    needs: contract
     env:
       PYTHON_KEYRING_BACKEND: keyring.backends.null.Keyring
     steps:
@@ -36,5 +72,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -e ".[dev,secure]" pytest-cov
-      - run: pytest -q -m "not integration" --cov=eolas_data --cov-report=term-missing
+      - run: pip install -e ".[dev,geo,secure]" pytest-cov
+      - run: pytest -q -m "not integration" --cov=eolas_data --cov-report=xml
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.xml
+          fail_ci_if_error: false
