@@ -331,6 +331,19 @@ class Client:
         "csv_gz":     ".csv.gz",
         "geoparquet": ".geo.parquet",
     }
+    # Mirrors the API guard in datasets.py — unbounded live pulls on datasets
+    # above this row count (or with geometry) return HTTP 413.
+    _LARGE_DATASET_ROW_THRESHOLD = 100_000
+
+    @staticmethod
+    def _bulk_export_allowed(meta: dict) -> bool:
+        return (meta.get("bulk_export_class") or "").lower() not in ("", "none")
+
+    @classmethod
+    def _live_pull_blocked(cls, meta: dict) -> bool:
+        """True when limit=0 with no date bounds would hit the API 413 guard."""
+        row_count = int(meta.get("row_count_at_last_refresh") or 0)
+        return bool(meta.get("has_geometry")) or row_count > cls._LARGE_DATASET_ROW_THRESHOLD
 
     @staticmethod
     def _require_bulk_export(meta: dict, name: Union[str, "DatasetName"]) -> None:
@@ -1891,22 +1904,37 @@ class Client:
                 return _pa.Table.from_pandas(pd.read_csv(file_path), preserve_index=False)
             return _pq.read_table(file_path)
 
-        if fmt == "geoparquet":
-            if resolved_as_geo:
+        def _read_bulk_file(path: pathlib.Path, bulk_fmt: str):
+            if bulk_fmt == "csv_gz":
+                return pd.read_csv(path)
+            if bulk_fmt == "geoparquet" and resolved_as_geo:
                 try:
                     import geopandas as gpd
-                    result = gpd.read_parquet(file_path)
-                    return self._attach_dataset_meta(result, name, meta=meta)
+                    return gpd.read_parquet(path)
                 except ImportError:
                     pass
-            result = pd.read_parquet(file_path)
-            return self._attach_dataset_meta(result, name, meta=meta)
-        elif fmt == "csv_gz":
-            result = pd.read_csv(file_path)
-            return self._attach_dataset_meta(result, name, meta=meta)
-        else:  # parquet
-            result = pd.read_parquet(file_path)
-            return self._attach_dataset_meta(result, name, meta=meta)
+            return pd.read_parquet(path)
+
+        try:
+            result = _read_bulk_file(file_path, fmt)
+        except OSError as exc:
+            # Bulk snapshots are written with pyarrow 24+ (Parquet 2.6). Older
+            # pyarrow builds fail with "Repetition level histogram size mismatch".
+            # csv_gz is always generated alongside parquet — fall back to it.
+            if fmt in ("parquet", "geoparquet") and "histogram" in str(exc).lower():
+                _log.warning(
+                    "Parquet read failed for %s (%s) — falling back to csv_gz bulk",
+                    name, exc,
+                )
+                csv_path = cache_path / f"{name}{self._BULK_EXTENSIONS['csv_gz']}"
+                self.sync_bulk(
+                    name, path=csv_path, format="csv_gz",
+                    freshness=freshness, progress=progress,
+                )
+                result = _read_bulk_file(csv_path, "csv_gz")
+            else:
+                raise
+        return self._attach_dataset_meta(result, name, meta=meta)
 
     # ------------------------------------------------------------------
     # Core data fetch
@@ -1991,6 +2019,41 @@ class Client:
                 "envelope=True requires format='json' and as_arrow=False."
             )
 
+        from .rows import apply_row_limit, resolve_fetch_limit, sort_by_date
+
+        # ---- whole-dataset pull on large/geo tables → bulk cache -------------
+        # Matches the API 413 guard: limit=0 with no start/end on >100k-row or
+        # geometry datasets is refused. Transparently serve from get_local()
+        # (CDN-backed Parquet/GeoParquet) so client.get("nz_addresses") works.
+        if (
+            limit is None
+            and start is None
+            and end is None
+            and format == "json"
+            and not envelope
+            and not as_arrow
+        ):
+            try:
+                info_meta = self._info_cached(name)
+                if self._bulk_export_allowed(info_meta) and self._live_pull_blocked(info_meta):
+                    result = self.get_local(
+                        name, as_geo=as_geo, as_arrow=False, meta=meta,
+                    )
+                    if engine == "polars":
+                        try:
+                            import polars as pl
+                            return pl.from_pandas(result)
+                        except ImportError:
+                            raise ImportError(
+                                "polars is required for engine='polars'. "
+                                "Install with: pip install eolas-data[polars]"
+                            )
+                    return result
+            except (BulkLicenceRestricted, BulkUpgradeRequired, BulkNotYetAvailable):
+                raise
+            except Exception:
+                pass  # fall through to live path (e.g. metadata lookup failed)
+
         # ---- early in-memory cache check -------------------------------------
         _early_cache_key = f"{name}:{start}:{end}:{format}:{0 if limit is None else int(limit)}:{as_geo}"
         if self._cache is not None and _early_cache_key in self._cache:
@@ -2002,9 +2065,18 @@ class Client:
             params["start"] = start
         if end:
             params["end"] = end
-        from .rows import apply_row_limit, resolve_fetch_limit, sort_by_date
 
         fetch_limit, user_limit = resolve_fetch_limit(limit)
+        # Positive limits on large/geo datasets must be sent to the API — the
+        # client normally uses limit=0 and trims client-side for dated series,
+        # but limit=0 triggers the API 413 guard on geometry / >100k tables.
+        if user_limit and int(user_limit) > 0 and start is None and end is None:
+            try:
+                info_meta = self._info_cached(name)
+                if self._live_pull_blocked(info_meta):
+                    fetch_limit = int(user_limit)
+            except Exception:
+                pass
         params["limit"] = fetch_limit
 
         cache_key = f"{name}:{start}:{end}:{format}:{0 if limit is None else int(limit)}:{as_geo}"

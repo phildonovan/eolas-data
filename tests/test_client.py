@@ -153,9 +153,13 @@ def test_get_limit_returns_most_recent(client):
 
 @resp_lib.activate
 def test_get_limit_requests_full_window_from_server(client):
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi",
+                 json={"name": "nz_cpi", "source": "Stats NZ", "has_geometry": False,
+                       "row_count_at_last_refresh": 500})
     resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi/data", json={"data": RECORDS})
     client.get("nz_cpi", limit=2)
-    assert "limit=0" in resp_lib.calls[0].request.url
+    data_reqs = [c for c in resp_lib.calls if "/data?" in c.request.url or c.request.url.endswith("/data")]
+    assert any("limit=0" in c.request.url for c in data_reqs)
 
 
 @resp_lib.activate
@@ -243,6 +247,42 @@ def test_get_as_geo_false_keeps_wkt(client):
     assert isinstance(df, Dataset)
     assert "geometry_wkt" in df.columns
     assert df["geometry_wkt"].iloc[0].startswith("POINT")
+
+
+LARGE_GEO_META = {
+    "name": "nz_addresses",
+    "namespace": "linz",
+    "bulk_export_class": "materialised",
+    "has_geometry": True,
+    "geometry_type": "point",
+    "row_count_at_last_refresh": 2_418_264,
+}
+
+
+@resp_lib.activate
+def test_get_whole_dataset_defers_to_get_local_for_large_geo(client):
+    """Whole-dataset pulls on geometry tables route to get_local(), not /data."""
+    sentinel = pd.DataFrame({"address_id": [1], "geometry_wkt": ["POINT (0 0)"]})
+    with patch.object(client, "get_local", return_value=sentinel) as mock_local:
+        resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_addresses",
+                     json=LARGE_GEO_META, status=200)
+        result = client.get("nz_addresses")
+    mock_local.assert_called_once()
+    assert result is sentinel
+
+
+@resp_lib.activate
+def test_get_limit_on_large_geo_sends_bounded_limit(client):
+    """Positive limits on geometry tables must not send limit=0 (API 413)."""
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_addresses",
+                 json=LARGE_GEO_META, status=200)
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_addresses/data",
+                 json={"data": GEO_RECORDS})
+    client.get("nz_addresses", limit=2)
+    data_reqs = [c for c in resp_lib.calls if "/data?" in c.request.url or c.request.url.endswith("/data")]
+    assert data_reqs, "expected a /data request"
+    assert any("limit=2" in c.request.url for c in data_reqs)
+    assert not any("limit=0" in c.request.url for c in data_reqs)
 
 
 @resp_lib.activate
