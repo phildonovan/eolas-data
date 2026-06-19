@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "eolas-data"
-version = "1.3.14"
+version = "1.3.15"
 description = "Python client for the eolas.fyi statistical data API (NZ, Australia, OECD)"
 readme = "README.md"
 license = { text = "MIT" }
