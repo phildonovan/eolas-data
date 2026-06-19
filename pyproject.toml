@@ -58,3 +58,8 @@ packages = ["eolas_data"]
 markers = [
     "integration: marks tests as requiring live API access (deselected by default)",
 ]
+
+[tool.coverage.run]
+omit = [
+    "eolas_data/_regen_names.py",
+]
