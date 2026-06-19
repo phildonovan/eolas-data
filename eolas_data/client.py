@@ -2063,6 +2063,7 @@ class Client:
         meta: bool = True,
         envelope: bool = False,
         force: bool = False,
+        progress: ProgressControl = None,
     ) -> Dataset:
         """Fetch dataset rows as a pandas (or polars / geopandas) DataFrame.
 
@@ -2103,6 +2104,11 @@ class Client:
             envelope: When ``True``, request ``?envelope=1`` (JSON only) and
                     attach the ``data_sources`` licence block alongside rows.
                     Response ``X-Eolas-*`` headers are merged into metadata.
+            force: When ``True`` and the request auto-routes to :meth:`get_local`,
+                    re-download the bulk file even when the sidecar says current.
+            progress: Control bulk download/read progress when auto-routed to
+                    :meth:`get_local`. ``None`` auto-detects TTY; ignored on the
+                    live API path.
 
         Returns:
             A :class:`Dataset` (pandas DataFrame subclass), a polars DataFrame
@@ -2148,7 +2154,12 @@ class Client:
                 info_meta = self._info_cached(name)
                 if self._bulk_export_allowed(info_meta) and self._live_pull_blocked(info_meta):
                     result = self.get_local(
-                        name, as_geo=as_geo, as_arrow=False, meta=meta, force=force,
+                        name,
+                        as_geo=as_geo,
+                        as_arrow=False,
+                        meta=meta,
+                        force=force,
+                        progress=progress,
                     )
                     if engine == "polars":
                         try:
