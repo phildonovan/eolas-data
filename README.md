@@ -183,7 +183,7 @@ r    = client.sync_bulk("nz_cpi", path="nz_cpi.parquet")
 path = client.download_bulk("treasury_fiscal_spending", path="t.parquet")
 ```
 
-**Progress bars:** `download_bulk`, `sync_bulk`, and `get_local` all show a `tqdm` progress bar automatically in interactive terminals and VSCode notebooks, so 1+ GB files are never silent. Pass `progress=False` to suppress in scripts, or set `EOLAS_NO_PROGRESS=1` in the environment for a CI-wide escape hatch. The `--no-progress` flag does the same from the CLI.
+**Progress bars:** `get_local()` shows two phases in interactive sessions — a **download** byte bar while fetching from CDN, then a **read** spinner while Parquet/GeoParquet is loaded (often the slow part on multi-million-row geo datasets). Control with `progress=True` (both), `False` (neither), `"download"`, or `"read"`. Set `EOLAS_NO_PROGRESS=1` to suppress both in batch scripts. Cached files skip the download bar and print an informative message instead.
 
 CLI mirror: `eolas download <name>` for one-shot, `eolas sync <name> [--watch hourly]` for an incremental check. Full docs: [docs.eolas.fyi/bulk-downloads/](https://docs.eolas.fyi/bulk-downloads/).
 

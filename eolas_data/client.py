@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import datetime
 import json
 import logging
@@ -7,7 +8,10 @@ import os
 import pathlib
 import sys
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import Literal, Optional, Union
+
+ProgressControl = Union[bool, str, None]
+ProgressPhase = Literal["download", "read"]
 
 import pandas as pd
 import requests
@@ -362,7 +366,7 @@ class Client:
         freshness: str = "auto",
         format: str = "parquet",
         path: Optional[Union[str, "pathlib.Path"]] = None,
-        progress: Optional[bool] = None,
+        progress: ProgressControl = None,
     ) -> "Union[pathlib.Path, bytes]":
         """Download a complete dataset as a single binary file.
 
@@ -387,14 +391,10 @@ class Client:
                 bytes. Pass a ``str`` or ``pathlib.Path`` to write to disk and
                 return the resolved path. Parent directories are created if
                 needed.
-            progress: Control the download progress bar.
-                ``None`` (default) auto-detects: bar shown when
-                ``sys.stdout.isatty()`` is True (interactive terminal or
-                notebook), hidden when piped or in CI.
-                ``True`` forces the bar on regardless (useful in log-tailing
-                scenarios).  ``False`` forces it off.  When ``path`` is
-                ``None`` (bytes mode) progress is always disabled — there is
-                no file path to label.
+            progress: Control the download progress bar (``"download"`` phase).
+                See :meth:`get_local` for the full selector vocabulary
+                (``"read"`` applies only to :meth:`get_local`). When ``path``
+                is ``None`` (bytes mode) progress is always disabled.
 
         Returns:
             ``pathlib.Path`` when ``path`` is set (the resolved, written path).
@@ -467,13 +467,13 @@ class Client:
         out = pathlib.Path(path).expanduser().resolve()
         out.parent.mkdir(parents=True, exist_ok=True)
 
-        show = self._resolve_show_progress(progress)
+        show = self._resolve_show_progress(progress, "download")
         resp = self._raw_bulk_get(bulk_path, params=params, stream=True)
         total = int(resp.headers.get("Content-Length", 0)) or None
         self._stream_to_file_with_progress(
             resp, out,
             total_bytes=total,
-            label=out.name,
+            label=f"Downloading {out.name}",
             show_progress=show,
         )
         return out
@@ -485,7 +485,7 @@ class Client:
         path: Union[str, "pathlib.Path"],
         format: str = "parquet",
         freshness: str = "auto",
-        progress: Optional[bool] = None,
+        progress: ProgressControl = None,
     ) -> SyncResult:
         """Incrementally sync a bulk dataset file — only re-download when the snapshot changes.
 
@@ -514,11 +514,10 @@ class Client:
                 ``"geoparquet"``.
             freshness: ``"auto"`` (default), ``"monthly"``, or ``"current"``.
                 Passed verbatim to the bulk endpoint.
-            progress: Control the download progress bar.
-                ``None`` (default) auto-detects via ``sys.stdout.isatty()``.
-                ``True`` forces the bar on; ``False`` forces it off.
-                When ``status="unchanged"`` no data is transferred so no bar
-                is shown regardless of this setting.
+            progress: Control the download progress bar (``"download"`` phase).
+                See :meth:`get_local` for the full selector vocabulary.
+                When ``status="unchanged"`` no download bar is shown; an
+                informative cached-file message is printed instead.
 
         Returns:
             A :class:`SyncResult` dataclass with ``status``,
@@ -606,6 +605,7 @@ class Client:
             and prev.get("snapshot_id") == current_sid
             and out.exists()
         ):
+            print(f"Using cached {out.name} (up to date).", file=sys.stderr)
             return SyncResult(
                 status="unchanged",
                 previous_snapshot_id=prev.get("snapshot_id"),
@@ -617,14 +617,14 @@ class Client:
         # Download (atomic replace).
         out.parent.mkdir(parents=True, exist_ok=True)
         tmp = out.with_suffix(out.suffix + f".eolas-tmp-{os.urandom(4).hex()}")
-        show = self._resolve_show_progress(progress)
+        show = self._resolve_show_progress(progress, "download")
         try:
             resp = self._raw_bulk_get(bulk_path, params=params, stream=True)
             total = int(resp.headers.get("Content-Length", 0)) or None
             bytes_dl = self._stream_to_file_with_progress(
                 resp, tmp,
                 total_bytes=total,
-                label=out.name,
+                label=f"Downloading {out.name}",
                 show_progress=show,
             )
             if bytes_dl == 0:
@@ -1159,27 +1159,72 @@ class Client:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _resolve_show_progress(progress: Optional[bool]) -> bool:
-        """Resolve the tri-state ``progress`` kwarg to a concrete bool.
-
-        Priority (highest first):
-        1. Explicit ``progress=True/False`` kwarg from the caller.
-        2. ``EOLAS_NO_PROGRESS=1`` environment variable — always suppresses.
-        3. Jupyter / IPython kernel detection — Jupyter wraps stdout in an
-           ``OutStream``, so ``sys.stdout.isatty()`` returns False even when
-           the user is clearly in an interactive notebook session. If
-           ``ipykernel`` is loaded (the standard signal used by tqdm itself),
-           we're in a notebook → show the bar; ``tqdm.auto`` then renders it
-           as an ipywidget (or text bar as fallback).
-        4. ``sys.stdout.isatty()`` auto-detection for plain terminals.
-        """
-        if progress is not None:
-            return bool(progress)
+    def _progress_auto_detect() -> bool:
+        """Whether progress feedback should show when ``progress`` is None."""
         if os.getenv("EOLAS_NO_PROGRESS", "").strip() in ("1", "true", "yes"):
             return False
         if "ipykernel" in sys.modules:
             return True
         return sys.stdout.isatty()
+
+    @staticmethod
+    def _resolve_progress_phases(progress: ProgressControl) -> dict[str, bool]:
+        """Map ``progress`` to download/read phase flags.
+
+        Accepts ``None``, ``True``/``False``, or ``"both"``, ``"download"``,
+        ``"read"``, ``"none"`` (and ``"all"`` as alias for ``"both"``).
+        """
+        if progress is False:
+            return {"download": False, "read": False}
+        if progress is True:
+            return {"download": True, "read": True}
+        if isinstance(progress, str):
+            key = progress.strip().lower()
+            table = {
+                "both": (True, True),
+                "all": (True, True),
+                "download": (True, False),
+                "read": (False, True),
+                "none": (False, False),
+            }
+            if key not in table:
+                raise ValueError(
+                    "progress must be True, False, None, or one of "
+                    "'both', 'download', 'read', 'none'."
+                )
+            d, r = table[key]
+            return {"download": d, "read": r}
+        auto = Client._progress_auto_detect()
+        return {"download": auto, "read": auto}
+
+    @staticmethod
+    def _resolve_show_progress(
+        progress: ProgressControl,
+        phase: ProgressPhase = "download",
+    ) -> bool:
+        """Resolve ``progress`` for one bulk phase (download or read)."""
+        return Client._resolve_progress_phases(progress)[phase]
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _with_read_progress(label: str, show: bool):
+        """Indeterminate spinner while materialising a cached bulk file."""
+        if not show:
+            yield
+            return
+        import tqdm.auto
+
+        bar = tqdm.auto.tqdm(
+            total=1,
+            desc=f"Loading {label} from disk",
+            leave=False,
+            bar_format="{desc}…",
+        )
+        try:
+            yield
+        finally:
+            bar.update(1)
+            bar.close()
 
     @staticmethod
     def _stream_to_file_with_progress(
@@ -1796,7 +1841,7 @@ class Client:
         as_geo: Optional[bool] = None,
         as_arrow: bool = False,
         meta: bool = True,
-        progress: Optional[bool] = None,
+        progress: ProgressControl = None,
     ) -> "pd.DataFrame":
         """Download (or serve from cache) a whole dataset as a local DataFrame.
 
@@ -1833,7 +1878,14 @@ class Client:
             meta: When ``True`` (default), attach table/column metadata from
                 :meth:`info` (session-cached). Pass ``False`` to skip the extra
                 round-trip.
-            progress: Forwarded to :meth:`sync_bulk` (``None`` auto-detects TTY).
+            progress: Control progress for two phases: **download** (streaming
+                byte bar via :meth:`sync_bulk`) and **read** (spinner while
+                Parquet/GeoParquet is loaded into a DataFrame). ``None``
+                (default) enables both in interactive sessions. ``True``/``False``
+                force both on/off. Use ``"download"``, ``"read"``, ``"both"``,
+                or ``"none"`` for one phase only. Suppressed by
+                ``EOLAS_NO_PROGRESS=1``. Cached snapshots skip the download bar
+                and print an informative message instead.
 
         Returns:
             ``pd.DataFrame`` (tabular) or ``geopandas.GeoDataFrame`` (geo +
@@ -1896,24 +1948,31 @@ class Client:
         # ---- sync (download if needed, HEAD check if cached) -----------------
         self.sync_bulk(name, path=file_path, format=fmt, freshness=freshness, progress=progress)
 
+        show_read = self._resolve_show_progress(progress, "read")
+        read_label = file_path.name
+
         # ---- read the local file into a DataFrame ----------------------------
         if as_arrow:
             import pyarrow.parquet as _pq
-            if fmt == "csv_gz":
-                import pyarrow as _pa
-                return _pa.Table.from_pandas(pd.read_csv(file_path), preserve_index=False)
-            return _pq.read_table(file_path)
+            with self._with_read_progress(read_label, show_read):
+                if fmt == "csv_gz":
+                    import pyarrow as _pa
+                    return _pa.Table.from_pandas(
+                        pd.read_csv(file_path), preserve_index=False,
+                    )
+                return _pq.read_table(file_path)
 
         def _read_bulk_file(path: pathlib.Path, bulk_fmt: str):
-            if bulk_fmt == "csv_gz":
-                return pd.read_csv(path)
-            if bulk_fmt == "geoparquet" and resolved_as_geo:
-                try:
-                    import geopandas as gpd
-                    return gpd.read_parquet(path)
-                except ImportError:
-                    pass
-            return pd.read_parquet(path)
+            with self._with_read_progress(read_label, show_read):
+                if bulk_fmt == "csv_gz":
+                    return pd.read_csv(path)
+                if bulk_fmt == "geoparquet" and resolved_as_geo:
+                    try:
+                        import geopandas as gpd
+                        return gpd.read_parquet(path)
+                    except ImportError:
+                        pass
+                return pd.read_parquet(path)
 
         try:
             result = _read_bulk_file(file_path, fmt)

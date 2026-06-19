@@ -421,6 +421,25 @@ def test_eolas_no_progress_env_suppresses_bar(client, tmp_path, monkeypatch):
     assert all(disabled_values), "EOLAS_NO_PROGRESS=1 must disable tqdm even when isatty=True"
 
 
+def test_progress_phase_selectors():
+    from eolas_data.client import Client
+
+    phases = Client._resolve_progress_phases("download")
+    assert phases == {"download": True, "read": False}
+
+    phases = Client._resolve_progress_phases("read")
+    assert phases == {"download": False, "read": True}
+
+    phases = Client._resolve_progress_phases("both")
+    assert phases == {"download": True, "read": True}
+
+    phases = Client._resolve_progress_phases("none")
+    assert phases == {"download": False, "read": False}
+
+    assert Client._resolve_show_progress("read", "read") is True
+    assert Client._resolve_show_progress("download", "read") is False
+
+
 def test_progress_resolver_detects_jupyter():
     """Jupyter wraps stdout so isatty() is False, but the user IS interactive
     and tqdm.auto can render a widget. Resolver must return True when
