@@ -39,6 +39,13 @@ _CONFIG_FILE = _CONFIG_DIR / "config.json"
 # Fallback cache directory (Step 5)
 _FALLBACK_DIR = pathlib.Path.home() / ".cache" / "eolas"
 
+# Bulk file extensions (mirrors Client._BULK_EXTENSIONS).
+_BULK_EXTENSIONS = {
+    "parquet":    ".parquet",
+    "csv_gz":     ".csv.gz",
+    "geoparquet": ".geo.parquet",
+}
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -92,6 +99,92 @@ def library_set(path: str) -> pathlib.Path:
 def library_clear() -> None:
     """Remove ``library_dir`` from ``~/.eolas/config.json`` (if present)."""
     _remove_config_key("library_dir")
+
+
+def cache_clear(
+    name: Optional[str] = None,
+    *,
+    cache_dir: Optional[str | pathlib.Path] = None,
+    format: Optional[str] = None,
+    files: bool = True,
+    meta: bool = True,
+    meta_cache: Optional[dict] = None,
+) -> dict:
+    """Clear client-side cache for a dataset (or the whole library).
+
+    eolas-data caches at two client-only levels:
+
+    * **On-disk bulk files** in the library directory (Parquet/GeoParquet +
+      ``.eolas-meta.json`` sidecars) — cleared when ``files=True``.
+    * **Session metadata** (``Client._meta_cache`` / ``info()`` per dataset) —
+      cleared when ``meta=True`` and ``meta_cache`` is the client's dict.
+
+    Does not contact the API. Use :meth:`Client.get_local` with ``force=True``
+    to clear and re-download in one step.
+
+    Args:
+        name: Dataset identifier. ``None`` sweeps the whole library (``files``)
+            and/or all session metadata entries (``meta``).
+        cache_dir: Library directory. ``None`` uses :func:`resolve_library_dir`.
+        format: ``"parquet"``, ``"csv_gz"``, or ``"geoparquet"``. ``None``
+            deletes all bulk variants for ``name`` (ignored when ``name`` is
+            ``None``).
+        files: Delete on-disk bulk data files and sidecars.
+        meta: Drop session-cached ``info()`` entries from ``meta_cache``.
+        meta_cache: The client's ``_meta_cache`` dict (required for ``meta``).
+
+    Returns:
+        ``{"files": [deleted paths], "meta_cleared": int}``
+    """
+    deleted: list[str] = []
+    meta_n = 0
+
+    if meta and meta_cache is not None:
+        if name is None:
+            meta_n = len(meta_cache)
+            meta_cache.clear()
+        else:
+            key = str(name)
+            if key in meta_cache:
+                del meta_cache[key]
+                meta_n = 1
+
+    if files:
+        root = (
+            pathlib.Path(cache_dir).expanduser().resolve()
+            if cache_dir is not None
+            else resolve_library_dir(interactive=False)
+        )
+        if name is None:
+            if root.is_dir():
+                for p in root.iterdir():
+                    if p.suffix in {".parquet", ".gz"} or p.name.endswith(".geo.parquet"):
+                        p.unlink(missing_ok=True)
+                        deleted.append(str(p))
+                    elif p.name.endswith(".eolas-meta.json"):
+                        p.unlink(missing_ok=True)
+                        deleted.append(str(p))
+        elif format is None:
+            for ext in _BULK_EXTENSIONS.values():
+                p = root / f"{name}{ext}"
+                for candidate in (p, pathlib.Path(str(p) + ".eolas-meta.json")):
+                    if candidate.exists():
+                        candidate.unlink()
+                        deleted.append(str(candidate))
+        else:
+            fmt = format.lower()
+            if fmt not in _BULK_EXTENSIONS:
+                raise ValueError(
+                    f"Unknown format {format!r}. Expected one of: "
+                    + ", ".join(_BULK_EXTENSIONS)
+                )
+            p = root / f"{name}{_BULK_EXTENSIONS[fmt]}"
+            for candidate in (p, pathlib.Path(str(p) + ".eolas-meta.json")):
+                if candidate.exists():
+                    candidate.unlink()
+                    deleted.append(str(candidate))
+
+    return {"files": deleted, "meta_cleared": meta_n}
 
 
 def library_status() -> dict:

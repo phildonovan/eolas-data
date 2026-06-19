@@ -204,6 +204,44 @@ def test_progress_kwarg_forces_hide(client, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# test_download_bulk_missing_content_length
+# ---------------------------------------------------------------------------
+
+@resp_lib.activate
+def test_download_bulk_missing_content_length(client, tmp_path):
+    """CDN may omit Content-Length — download must succeed with indeterminate bar."""
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi",
+                 json=BULK_DATASET_META, status=200)
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/bulk/statsnz/nz_cpi",
+                 body=FAKE_PARQUET,
+                 content_type="application/octet-stream",
+                 status=200)
+    # Deliberately no Content-Length header.
+
+    dest = tmp_path / "nz_cpi.parquet"
+    totals_seen = []
+
+    class FakeTqdm:
+        def __init__(self, **kwargs):
+            totals_seen.append(kwargs.get("total"))
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            pass
+        def update(self, n):
+            pass
+
+    with patch("sys.stdout") as mock_stdout, \
+         patch("tqdm.auto.tqdm", FakeTqdm):
+        mock_stdout.isatty.return_value = True
+        out = client.download_bulk("nz_cpi", path=dest, progress=True)
+
+    assert out == dest
+    assert dest.read_bytes() == FAKE_PARQUET
+    assert totals_seen == [None]
+
+
+# ---------------------------------------------------------------------------
 # test_sync_bulk_unchanged_no_bar
 # ---------------------------------------------------------------------------
 

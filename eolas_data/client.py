@@ -266,6 +266,36 @@ class Client:
             self._meta_cache[key] = self.info(name)
         return self._meta_cache[key]
 
+    def _apply_force(self, name: Union[str, "DatasetName"], force: bool) -> None:
+        if force:
+            self._meta_cache.pop(str(name), None)
+
+    def cache_clear(
+        self,
+        name: Optional[Union[str, "DatasetName"]] = None,
+        *,
+        cache_dir: Optional[Union[str, "pathlib.Path"]] = None,
+        format: Optional[str] = None,
+        files: bool = True,
+        meta: bool = True,
+    ) -> dict:
+        """Clear client-side cache (library files and/or session metadata).
+
+        See :func:`eolas_data.library.cache_clear` for details. Pass
+        ``force=True`` to :meth:`get_local` / :meth:`sync_bulk` to clear
+        metadata and re-download in one step.
+        """
+        from .library import cache_clear as _cache_clear
+
+        return _cache_clear(
+            None if name is None else str(name),
+            cache_dir=cache_dir,
+            format=format,
+            files=files,
+            meta=meta,
+            meta_cache=self._meta_cache if meta else None,
+        )
+
     def _attach_dataset_meta(
         self,
         result: "pd.DataFrame",
@@ -486,6 +516,7 @@ class Client:
         format: str = "parquet",
         freshness: str = "auto",
         progress: ProgressControl = None,
+        force: bool = False,
     ) -> SyncResult:
         """Incrementally sync a bulk dataset file — only re-download when the snapshot changes.
 
@@ -518,6 +549,8 @@ class Client:
                 See :meth:`get_local` for the full selector vocabulary.
                 When ``status="unchanged"`` no download bar is shown; an
                 informative cached-file message is printed instead.
+            force: When ``True``, skip the sidecar unchanged fast path and
+                re-download even when the local snapshot id matches the server.
 
         Returns:
             A :class:`SyncResult` dataclass with ``status``,
@@ -565,6 +598,8 @@ class Client:
                 f"Unknown freshness {freshness!r}. Expected 'auto', 'monthly', or 'current'."
             )
 
+        self._apply_force(name, force)
+
         out = pathlib.Path(path).expanduser().resolve()
         sidecar = pathlib.Path(str(out) + ".eolas-meta.json")
 
@@ -601,7 +636,8 @@ class Client:
 
         # No-op fast path: snapshot hasn't changed AND file exists on disk.
         if (
-            prev is not None
+            not force
+            and prev is not None
             and prev.get("snapshot_id") == current_sid
             and out.exists()
         ):
@@ -677,6 +713,7 @@ class Client:
         *,
         format: str = "parquet",
         progress: Optional[bool] = None,
+        force: bool = False,
     ) -> SyncResult:
         """Incrementally sync a changelog-tier dataset via the /changes feed.
 
@@ -710,6 +747,7 @@ class Client:
                 changelog sync; other formats raise ``ValueError``.
             progress: Forwarded to :meth:`sync_bulk` for the baseline download
                 progress bar (``None`` auto-detects TTY).
+            force: When ``True``, re-baseline from a full bulk snapshot.
 
         Returns:
             A :class:`SyncResult` with ``sync_mode='changelog'``,
@@ -748,6 +786,7 @@ class Client:
 
         out = pathlib.Path(path).expanduser().resolve()
         sidecar_path = pathlib.Path(str(out) + ".eolas-meta.json")
+        self._apply_force(name, force)
 
         # Read sidecar.
         sidecar: Optional[dict] = None
@@ -758,7 +797,7 @@ class Client:
                 sidecar = None
 
         # Determine if we need a cold-start baseline.
-        needs_baseline = (
+        needs_baseline = force or (
             sidecar is None
             or sidecar.get("sync_mode") != "changelog"
             or sidecar.get("watermark_seq") is None
@@ -782,6 +821,7 @@ class Client:
                 format=fmt,
                 freshness="current",
                 progress=progress,
+                force=force,
             )
             baseline_snapshot_id = bulk_result.current_snapshot_id
 
@@ -844,6 +884,7 @@ class Client:
                 format=fmt,
                 freshness="current",
                 progress=progress,
+                force=force,
             )
             baseline_snapshot_id = bulk_result.current_snapshot_id
             high_seq = self._fetch_changes_seq_high(changes_url, since_seq=2**62)
@@ -948,6 +989,7 @@ class Client:
         format: str = "parquet",
         freshness: str = "auto",
         progress: Optional[bool] = None,
+        force: bool = False,
     ) -> SyncResult:
         """Unified sync dispatcher — keeps a local file current automatically.
 
@@ -973,6 +1015,7 @@ class Client:
             freshness: ``"auto"`` (default), ``"monthly"``, or ``"current"``. Only
                 used for the snapshot path (passed to :meth:`sync_bulk`).
             progress: Control the download progress bar.
+            force: Bypass local unchanged cache and re-sync from the server.
 
         Returns:
             A :class:`SyncResult`. The ``sync_mode`` field is ``"snapshot"`` or
@@ -996,7 +1039,7 @@ class Client:
         tier = meta.get("cdc_serving_tier", "snapshot") or "snapshot"
 
         if tier == "changelog":
-            return self.sync_changes(name, path, format=format, progress=progress)
+            return self.sync_changes(name, path, format=format, progress=progress, force=force)
         else:
             result = self.sync_bulk(
                 name,
@@ -1004,6 +1047,7 @@ class Client:
                 format=format,
                 freshness=freshness,
                 progress=progress,
+                force=force,
             )
             # Tag the result with sync_mode so callers don't need to inspect tier.
             result.sync_mode = "snapshot"
@@ -1842,6 +1886,7 @@ class Client:
         as_arrow: bool = False,
         meta: bool = True,
         progress: ProgressControl = None,
+        force: bool = False,
     ) -> "pd.DataFrame":
         """Download (or serve from cache) a whole dataset as a local DataFrame.
 
@@ -1886,6 +1931,8 @@ class Client:
                 or ``"none"`` for one phase only. Suppressed by
                 ``EOLAS_NO_PROGRESS=1``. Cached snapshots skip the download bar
                 and print an informative message instead.
+            force: Re-download the library file even when the sidecar says the
+                snapshot is current. See :meth:`cache_clear`.
 
         Returns:
             ``pd.DataFrame`` (tabular) or ``geopandas.GeoDataFrame`` (geo +
@@ -1908,6 +1955,7 @@ class Client:
             )
         # Resolve as_geo: None → True (auto) unless as_arrow overrides.
         resolved_as_geo = as_geo if as_geo is not None else (not as_arrow)
+        self._apply_force(name, force)
 
         # ---- resolve cache_dir -----------------------------------------------
         if cache_dir is not None:
@@ -1946,7 +1994,10 @@ class Client:
         file_path = cache_path / f"{name}{ext}"
 
         # ---- sync (download if needed, HEAD check if cached) -----------------
-        self.sync_bulk(name, path=file_path, format=fmt, freshness=freshness, progress=progress)
+        self.sync_bulk(
+            name, path=file_path, format=fmt, freshness=freshness,
+            progress=progress, force=force,
+        )
 
         show_read = self._resolve_show_progress(progress, "read")
         read_label = file_path.name
@@ -1988,7 +2039,7 @@ class Client:
                 csv_path = cache_path / f"{name}{self._BULK_EXTENSIONS['csv_gz']}"
                 self.sync_bulk(
                     name, path=csv_path, format="csv_gz",
-                    freshness=freshness, progress=progress,
+                    freshness=freshness, progress=progress, force=force,
                 )
                 result = _read_bulk_file(csv_path, "csv_gz")
             else:
@@ -2011,6 +2062,7 @@ class Client:
         as_arrow: bool = False,
         meta: bool = True,
         envelope: bool = False,
+        force: bool = False,
     ) -> Dataset:
         """Fetch dataset rows as a pandas (or polars / geopandas) DataFrame.
 
@@ -2096,7 +2148,7 @@ class Client:
                 info_meta = self._info_cached(name)
                 if self._bulk_export_allowed(info_meta) and self._live_pull_blocked(info_meta):
                     result = self.get_local(
-                        name, as_geo=as_geo, as_arrow=False, meta=meta,
+                        name, as_geo=as_geo, as_arrow=False, meta=meta, force=force,
                     )
                     if engine == "polars":
                         try:

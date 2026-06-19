@@ -438,3 +438,62 @@ def test_cli_sync_unknown_freshness_exits_usage():
 def test_cli_sync_invalid_watch_exits_usage():
     result = runner.invoke(app, ["sync", "nz_cpi", "--watch", "forever", "--api-key", "k"])
     assert result.exit_code == cli_module.EXIT_USAGE
+
+
+# ---------------------------------------------------------------------------
+# cache_clear / force
+# ---------------------------------------------------------------------------
+
+@resp_lib.activate
+def test_sync_bulk_force_redownloads_when_unchanged(client, tmp_path):
+    """force=True skips the sidecar unchanged fast path."""
+    dest = tmp_path / "nz_cpi.parquet"
+    dest.write_bytes(FAKE_PARQUET)
+    _write_sidecar(dest, SNAPSHOT_V1)
+
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi",
+                 json=BULK_DATASET_META, status=200)
+    resp_lib.add(resp_lib.HEAD, f"{BASE}/v1/bulk/statsnz/nz_cpi",
+                 body=b"", status=200,
+                 headers={"X-Snapshot-Version": SNAPSHOT_V1})
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/bulk/statsnz/nz_cpi",
+                 body=FAKE_PARQUET_V2,
+                 content_type="application/octet-stream",
+                 status=200)
+
+    result = client.sync_bulk("nz_cpi", path=dest, force=True)
+
+    assert result.status == "updated"
+    assert dest.read_bytes() == FAKE_PARQUET_V2
+
+
+def test_cache_clear_removes_files_and_session_meta(client, tmp_path, monkeypatch):
+    """cache_clear deletes on-disk bulk files and drops session info cache."""
+    monkeypatch.setenv("EOLAS_LIBRARY", str(tmp_path))
+
+    dest = tmp_path / "nz_parcels.geo.parquet"
+    dest.write_bytes(FAKE_PARQUET)
+    _write_sidecar(dest, SNAPSHOT_V1)
+
+    client._meta_cache["nz_parcels"] = {"name": "nz_parcels"}
+
+    cleared = client.cache_clear("nz_parcels")
+
+    assert not dest.exists()
+    assert not pathlib.Path(str(dest) + ".eolas-meta.json").exists()
+    assert "nz_parcels" not in client._meta_cache
+    assert len(cleared["files"]) >= 2
+    assert cleared["meta_cleared"] == 1
+
+
+def test_cache_clear_meta_only(client):
+    """files=False clears session metadata without deleting library files."""
+    client._meta_cache["nz_cpi"] = {"name": "nz_cpi"}
+    client._meta_cache["nz_parcels"] = {"name": "nz_parcels"}
+
+    cleared = client.cache_clear("nz_cpi", files=False)
+
+    assert "nz_cpi" not in client._meta_cache
+    assert "nz_parcels" in client._meta_cache
+    assert cleared["files"] == []
+    assert cleared["meta_cleared"] == 1

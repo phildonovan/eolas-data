@@ -68,6 +68,40 @@ def split_meta(info: dict) -> tuple[dict, Optional[pd.DataFrame]]:
     return table, columns
 
 
+def _column_meta_records(
+    column_meta: Optional[pd.DataFrame | list[dict[str, Any]]],
+) -> Optional[list[dict[str, Any]]]:
+    if column_meta is None:
+        return None
+    if isinstance(column_meta, pd.DataFrame):
+        if column_meta.empty:
+            return None
+        return column_meta.to_dict("records")
+    if isinstance(column_meta, list):
+        return column_meta or None
+    return None
+
+
+def _column_meta_dataframe(
+    column_meta: Optional[pd.DataFrame | list[dict[str, Any]]],
+) -> Optional[pd.DataFrame]:
+    if column_meta is None:
+        return None
+    if isinstance(column_meta, pd.DataFrame):
+        return column_meta if not column_meta.empty else None
+    if isinstance(column_meta, list) and column_meta:
+        return pd.DataFrame(column_meta)
+    return None
+
+
+def _is_geodataframe(df: pd.DataFrame) -> bool:
+    try:
+        import geopandas as gpd
+    except ImportError:
+        return False
+    return isinstance(df, gpd.GeoDataFrame)
+
+
 def attach_meta(
     df: pd.DataFrame,
     *,
@@ -77,16 +111,32 @@ def attach_meta(
     column_meta: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """Attach eolas metadata attrs to a DataFrame / Dataset / GeoDataFrame."""
-    payload = {
+    col_records = _column_meta_records(column_meta)
+    col_df = _column_meta_dataframe(column_meta)
+    # attrs must be JSON-serialisable — never store a DataFrame there (breaks
+    # pandas repr/head on GeoDataFrames when attrs are compared with ==).
+    attrs_payload = {
         "eolas_name": name,
         "eolas_source": source,
         "eolas_meta": table_meta or {},
-        "eolas_columns": column_meta,
+        "eolas_columns": col_records,
     }
     attrs = getattr(df, "attrs", None)
     if isinstance(attrs, dict):
-        attrs.update(payload)
-    for key, val in payload.items():
+        attrs.update(attrs_payload)
+
+    if _is_geodataframe(df):
+        # GeoDataFrame: attrs only — setattr triggers geopandas/pandas warnings
+        # and can break tabular repr.
+        return df
+
+    object_payload = {
+        "eolas_name": name,
+        "eolas_source": source,
+        "eolas_meta": table_meta or {},
+        "eolas_columns": col_df,
+    }
+    for key, val in object_payload.items():
         try:
             setattr(df, key, val)
         except (AttributeError, TypeError):
@@ -108,7 +158,11 @@ def meta_subtitle(table_meta: Optional[dict]) -> str:
     return " · ".join(parts)
 
 
-def column_label(column_meta: Optional[pd.DataFrame], column: str) -> Optional[str]:
+def column_label(
+    column_meta: Optional[pd.DataFrame | list[dict[str, Any]]],
+    column: str,
+) -> Optional[str]:
+    column_meta = _column_meta_dataframe(column_meta)
     if column_meta is None or column_meta.empty or "name" not in column_meta.columns:
         return None
     rows = column_meta.loc[column_meta["name"] == column, "description"]

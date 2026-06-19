@@ -15,7 +15,7 @@ from .exceptions import (
     WatermarkExpired,
 )
 
-__version__ = "1.3.3"
+__version__ = "1.3.13"
 
 __all__ = [
     "Client",

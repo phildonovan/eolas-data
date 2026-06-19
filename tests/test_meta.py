@@ -62,6 +62,32 @@ def test_meta_false_skips_info_fetch(client):
     assert df.eolas_columns is None
 
 
+def test_attach_meta_geodataframe_head_does_not_break_repr():
+    gpd = pytest.importorskip("geopandas")
+    from shapely.geometry import Point
+
+    from eolas_data.meta import attach_meta
+
+    gdf = gpd.GeoDataFrame(
+        {"id": [1]},
+        geometry=[Point(0, 0)],
+        crs="EPSG:4326",
+    )
+    cols = pd.DataFrame([
+        {"name": "id", "type": "int", "description": "Identifier"},
+    ])
+    attach_meta(
+        gdf,
+        name="nz_addresses",
+        source="LINZ",
+        table_meta={"title": "NZ Addresses"},
+        column_meta=cols,
+    )
+    gdf.head()  # must not raise (pandas attrs must not hold DataFrames)
+    assert gdf.attrs["eolas_name"] == "nz_addresses"
+    assert gdf.attrs["eolas_columns"][0]["name"] == "id"
+
+
 @resp_lib.activate
 def test_info_cached_on_second_get(client):
     resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi/data", json={"data": RECORDS})
