@@ -55,6 +55,16 @@ _TABLE_META_KEYS = (
     "refresh_cadence",
     "last_refreshed_at",
     "previous_snapshots",
+    "date_filter_column",
+)
+
+# Mirrors app/streaming.py::detect_date_col — columns that /data?start=&end= filter on.
+DATE_FILTER_CANDIDATES = (
+    "date",
+    "time_frame",
+    "open_date",
+    "awarded_date",
+    "start_date",
 )
 
 
@@ -173,3 +183,43 @@ def column_label(
         return None
     text = str(val).strip()
     return text or None
+
+
+def date_filter_column_from_info(info: dict) -> Optional[str]:
+    """Return the column name used for start/end filtering, or None if unsupported."""
+    if not info:
+        return None
+    if "date_filter_column" in info:
+        col = info.get("date_filter_column")
+        return col if col else None
+    raw_cols = info.get("columns")
+    if not raw_cols:
+        return None
+    if isinstance(raw_cols, pd.DataFrame):
+        names = set(raw_cols["name"].astype(str)) if "name" in raw_cols.columns else set()
+    else:
+        names = {
+            str(c["name"])
+            for c in raw_cols
+            if isinstance(c, dict) and c.get("name")
+        }
+    return next((c for c in DATE_FILTER_CANDIDATES if c in names), None)
+
+
+def resolve_date_bounds(
+    info: Optional[dict],
+    start: Optional[str],
+    end: Optional[str],
+) -> tuple[Optional[str], Optional[str], bool]:
+    """Return (start, end, stripped) — clear bounds when the dataset has no date axis.
+
+    When stripped is True, callers should warn that start/end were ignored.
+    If metadata is unavailable, bounds are passed through unchanged (safe default).
+    """
+    if start is None and end is None:
+        return None, None, False
+    if info is None:
+        return start, end, False
+    if date_filter_column_from_info(info):
+        return start, end, False
+    return None, None, True

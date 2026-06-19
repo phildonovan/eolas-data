@@ -2136,7 +2136,26 @@ class Client:
                 "envelope=True requires format='json' and as_arrow=False."
             )
 
+        from .meta import resolve_date_bounds
         from .rows import apply_row_limit, resolve_fetch_limit, sort_by_date
+
+        # ---- start/end only apply when the dataset has a date filter column ---
+        _date_bounds_info: Optional[dict] = None
+        if start is not None or end is not None:
+            try:
+                _date_bounds_info = self._info_cached(name)
+            except Exception:
+                pass
+            start, end, _stripped = resolve_date_bounds(_date_bounds_info, start, end)
+            if _stripped:
+                import warnings
+                warnings.warn(
+                    f"start=/end= ignored for {name!r}: this dataset has no date "
+                    "filter column (not a time-series table). Use limit= for row "
+                    "caps or get_local() for the full table.",
+                    UserWarning,
+                    stacklevel=2,
+                )
 
         # ---- whole-dataset pull on large/geo tables → bulk cache -------------
         # Matches the API 413 guard: limit=0 with no start/end on >100k-row or

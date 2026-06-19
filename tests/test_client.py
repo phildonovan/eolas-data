@@ -164,9 +164,16 @@ def test_get_limit_requests_full_window_from_server(client):
 
 @resp_lib.activate
 def test_get_passes_date_params(client):
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi",
+                 json={"name": "nz_cpi", "date_filter_column": "date"})
     resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi/data", json={"data": RECORDS})
     client.get("nz_cpi", start="2023-01-01", end="2023-06-30")
-    req = resp_lib.calls[0].request
+    data_reqs = [
+        c for c in resp_lib.calls
+        if c.request.url.endswith("/data") or "/data?" in c.request.url
+    ]
+    assert data_reqs, "expected a /data request"
+    req = data_reqs[0].request
     assert "start=2023-01-01" in req.url
     assert "end=2023-06-30" in req.url
 
