@@ -410,7 +410,9 @@ class Client:
         Wraps ``GET /v1/bulk/{namespace}/{table}`` which streams a Parquet,
         gzipped-CSV, or GeoParquet snapshot. Monthly snapshots are served from
         Cloudflare's edge cache and are typically delivered in milliseconds.
-        Current snapshots are lazy-generated for Pro users on first request.
+        Pro ``freshness=current`` uses a pre-materialised snapshot when one
+        exists; if not, the server falls back to the latest monthly file
+        (see response header ``X-Eolas-Freshness-Resolved``).
 
         The endpoint requires both ``namespace`` and ``table``. These are
         resolved automatically by first calling ``GET /v1/datasets/{name}`` and
@@ -2480,8 +2482,47 @@ class Client:
             except Exception:
                 detail = "Not found."
             raise NotFoundError(detail)
+        detail = Client._error_detail(resp)
+        raise APIError(resp.status_code, detail)
+
+    @staticmethod
+    def _error_detail(resp: requests.Response) -> str:
+        """Extract a user-facing message from an error response body."""
         try:
             detail = resp.json().get("detail", resp.text)
         except Exception:
             detail = resp.text
-        raise APIError(resp.status_code, detail)
+        return Client._sanitize_error_detail(resp, detail)
+
+    @staticmethod
+    def _sanitize_error_detail(resp: requests.Response, detail: str) -> str:
+        """Turn Cloudflare HTML error pages into a short, actionable message."""
+        if not detail:
+            cf_ray = resp.headers.get("cf-ray", "")
+            suffix = f" (cf-ray {cf_ray})" if cf_ray else ""
+            return (
+                f"Empty response body (HTTP {resp.status_code}). "
+                f"Likely a gateway or origin timeout — retry, or for large "
+                f"bulk datasets try `--freshness monthly`{suffix}."
+            )
+        lowered = detail.lower()
+        if "<!doctype html>" in lowered or "cf-error" in lowered:
+            title = "Bad gateway" if resp.status_code == 502 else "Gateway error"
+            cf_ray = resp.headers.get("cf-ray", "")
+            parts = [
+                f"{title} (HTTP {resp.status_code}) from api.eolas.fyi — "
+                "the API server was temporarily unavailable.",
+            ]
+            if resp.status_code in (502, 503, 504):
+                parts.append(
+                    "For large bulk datasets (e.g. nz_parcels), try "
+                    "`eolas download <name> --freshness monthly`."
+                )
+            else:
+                parts.append("Retry in a few minutes.")
+            if cf_ray:
+                parts.append(f"(cf-ray {cf_ray})")
+            return " ".join(parts)
+        if len(detail) > 500:
+            return detail[:500] + "…"
+        return detail
