@@ -401,6 +401,10 @@ def download_cmd(
         False, "--no-progress",
         help="Disable the download progress bar (useful when output is captured by a log collector).",
     ),
+    show_progress: bool        = typer.Option(
+        False, "--progress",
+        help="Always show the download progress bar (even when stdout/stderr are not a TTY).",
+    ),
     api_key:     Optional[str]  = typer.Option(None, "--api-key"),
 ) -> None:
     """Download a dataset as a single file (Parquet, CSV, or GeoParquet).
@@ -438,6 +442,15 @@ def download_cmd(
     except EolasError as e:
         _bail(str(e), _exit_for(e))
 
+    if show_progress and no_progress:
+        _bail("--progress and --no-progress are mutually exclusive", EXIT_USAGE)
+    if show_progress:
+        _progress: Optional[bool] = True
+    elif no_progress:
+        _progress = False
+    else:
+        _progress = None
+
     if use_live:
         if freshness != "auto":
             err_console.print(
@@ -455,7 +468,7 @@ def download_cmd(
                 name,
                 path=out,
                 format=live_fmt,
-                progress=False if no_progress else None,
+                progress=_progress,
             )
         except EolasError as e:
             _bail(str(e), _exit_for(e))
@@ -474,7 +487,7 @@ def download_cmd(
                 freshness=freshness,
                 format=server_fmt,
                 path=out,
-                progress=False if no_progress else None,
+                progress=_progress,
             )
         except BulkUpgradeRequired as e:
             err_console.print(f"[red]error:[/red] {e}")
@@ -488,7 +501,7 @@ def download_cmd(
                     name,
                     path=out,
                     format=live_fmt,
-                    progress=False if no_progress else None,
+                    progress=_progress,
                 )
             except EolasError as e:
                 _bail(str(e), _exit_for(e))

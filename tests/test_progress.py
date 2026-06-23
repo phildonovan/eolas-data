@@ -478,6 +478,20 @@ def test_progress_phase_selectors():
     assert Client._resolve_show_progress("download", "read") is False
 
 
+def test_progress_auto_detect_uses_stderr_tty():
+    """tqdm writes to stderr; progress should show when stderr is a TTY even if stdout is piped."""
+    from unittest.mock import patch
+    from eolas_data.client import Client
+
+    with patch("sys.stdout.isatty", return_value=False), \
+         patch("sys.stderr.isatty", return_value=True):
+        assert Client._progress_auto_detect() is True
+
+    with patch("sys.stdout.isatty", return_value=False), \
+         patch("sys.stderr.isatty", return_value=False):
+        assert Client._progress_auto_detect() is False
+
+
 def test_progress_resolver_detects_jupyter():
     """Jupyter wraps stdout so isatty() is False, but the user IS interactive
     and tqdm.auto can render a widget. Resolver must return True when

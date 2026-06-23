@@ -1296,7 +1296,9 @@ class Client:
             return False
         if "ipykernel" in sys.modules:
             return True
-        return sys.stdout.isatty()
+        # tqdm writes to stderr; many terminals/IDEs pipe stdout but keep stderr
+        # on the controlling TTY (Cursor, VS Code, script wrappers).
+        return sys.stderr.isatty() or sys.stdout.isatty()
 
     @staticmethod
     def _resolve_progress_phases(progress: ProgressControl) -> dict[str, bool]:
@@ -1401,8 +1403,10 @@ class Client:
             unit_scale=True,
             unit_divisor=1024,
             desc=label,
+            file=sys.stderr,
+            dynamic_ncols=True,
             disable=not show_progress,
-            leave=False,
+            leave=True,
         ) as bar:
             with dest.open("wb") as fh:
                 # 1 MiB chunks: responsive bar updates (bar refreshes ~once per
