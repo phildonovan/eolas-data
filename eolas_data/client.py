@@ -365,6 +365,13 @@ class Client:
         "csv_gz":     ".csv.gz",
         "geoparquet": ".geo.parquet",
     }
+    _LIVE_DOWNLOAD_FORMATS = {"csv", "parquet", "arrow", "json"}
+    _LIVE_DOWNLOAD_EXTENSIONS = {
+        "csv":     ".csv",
+        "parquet": ".parquet",
+        "arrow":   ".arrow",
+        "json":    ".json",
+    }
     # Mirrors the API guard in datasets.py — unbounded live pulls on datasets
     # above this row count (or with geometry) return HTTP 413.
     _LARGE_DATASET_ROW_THRESHOLD = 100_000
@@ -499,6 +506,86 @@ class Client:
 
         show = self._resolve_show_progress(progress, "download")
         resp = self._raw_bulk_get(bulk_path, params=params, stream=True)
+        total = int(resp.headers.get("Content-Length", 0)) or None
+        self._stream_to_file_with_progress(
+            resp, out,
+            total_bytes=total,
+            label=f"Downloading {out.name}",
+            show_progress=show,
+        )
+        return out
+
+    def download(
+        self,
+        name: Union[str, "DatasetName"],
+        *,
+        path: Optional[Union[str, "pathlib.Path"]] = None,
+        format: str = "csv",
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        limit: Optional[int] = None,
+        progress: ProgressControl = None,
+    ) -> "Union[pathlib.Path, bytes]":
+        """Download a dataset via the live ``/v1/datasets/{name}/data`` endpoint.
+
+        Works for **all** datasets — including OECD and other licence-restricted
+        tables where bulk export is unavailable (e.g. ``nz_cpi``). For whole-dataset
+        pulls on very large or geospatial tables, prefer :meth:`download_bulk` when
+        bulk export is permitted.
+
+        Args:
+            name: Dataset identifier, e.g. ``"nz_cpi"``.
+            path: Where to write the file. ``None`` (default) returns raw bytes.
+            format: ``"csv"`` (default), ``"parquet"``, ``"arrow"``, or ``"json"``.
+            start: ISO date lower bound.
+            end: ISO date upper bound.
+            limit: Max rows. ``None`` (default) requests the full dataset (subject
+                to plan caps). Pass an integer to cap rows.
+            progress: Download progress bar control (``"download"`` phase only).
+
+        Returns:
+            ``pathlib.Path`` when ``path`` is set; ``bytes`` when ``path`` is ``None``.
+
+        Examples::
+
+            client.download("nz_cpi", path="nz_cpi.csv")
+            client.download("nz_cpi", format="parquet", path="nz_cpi.parquet")
+            raw = client.download("nz_cpi", format="csv")
+        """
+        fmt = format.lower()
+        if fmt not in self._LIVE_DOWNLOAD_FORMATS:
+            raise ValueError(
+                f"Unknown format {format!r}. Expected one of: "
+                f"{', '.join(sorted(self._LIVE_DOWNLOAD_FORMATS))}."
+            )
+
+        params: dict = {"format": fmt}
+        if start:
+            params["start"] = start
+        if end:
+            params["end"] = end
+        if limit is not None:
+            from .rows import resolve_fetch_limit
+            fetch_limit, _ = resolve_fetch_limit(limit)
+            params["limit"] = fetch_limit
+        elif start is None and end is None:
+            params["limit"] = 0
+        else:
+            params["limit"] = 0
+
+        if path is None:
+            resp = self._raw_get(f"/v1/datasets/{name}/data", params=params)
+            return resp.content
+
+        out = pathlib.Path(path).expanduser().resolve()
+        if not out.suffix and fmt in self._LIVE_DOWNLOAD_EXTENSIONS:
+            out = out.with_suffix(self._LIVE_DOWNLOAD_EXTENSIONS[fmt])
+        out.parent.mkdir(parents=True, exist_ok=True)
+
+        show = self._resolve_show_progress(progress, "download")
+        resp = self._raw_get(
+            f"/v1/datasets/{name}/data", params=params, stream=True,
+        )
         total = int(resp.headers.get("Content-Length", 0)) or None
         self._stream_to_file_with_progress(
             resp, out,
@@ -2334,9 +2421,15 @@ class Client:
     def _get(self, path: str, params: Optional[dict] = None) -> dict:
         return self._raw_get(path, params=params).json()
 
-    def _raw_get(self, path: str, params: Optional[dict] = None) -> requests.Response:
+    def _raw_get(
+        self,
+        path: str,
+        params: Optional[dict] = None,
+        *,
+        stream: bool = False,
+    ) -> requests.Response:
         url  = f"{self._base}{path}"
-        resp = self._session.get(url, params=params)
+        resp = self._session.get(url, params=params, stream=stream)
         self._raise_for_status(resp)
         return resp
 

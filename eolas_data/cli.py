@@ -342,7 +342,7 @@ def get_cmd(
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# download command — bulk single-file downloads via /v1/bulk/{namespace}/{table}
+# download command — bulk snapshot when available; live API otherwise (OECD/CPI)
 # ────────────────────────────────────────────────────────────────────────────
 
 # Map CLI --format aliases to the values the server (and client.download_bulk) accept.
@@ -353,11 +353,26 @@ _DOWNLOAD_FORMAT_MAP = {
     "geoparquet": "geoparquet",
 }
 
+# Live /v1/datasets/{name}/data formats when bulk export is unavailable.
+_LIVE_DOWNLOAD_FORMAT_MAP = {
+    "parquet":    "parquet",
+    "csv":        "csv",
+    "csv_gz":     "csv",
+    "geoparquet": "parquet",
+}
+
 # Default output-file extensions for each format (used when --out is not set).
 _DOWNLOAD_EXT = {
     "parquet":    ".parquet",
     "csv_gz":     ".csv.gz",
     "geoparquet": ".geo.parquet",
+}
+
+_LIVE_DOWNLOAD_EXT = {
+    "parquet":    ".parquet",
+    "csv":        ".csv",
+    "csv_gz":     ".csv",
+    "geoparquet": ".parquet",
 }
 
 
@@ -388,16 +403,16 @@ def download_cmd(
     ),
     api_key:     Optional[str]  = typer.Option(None, "--api-key"),
 ) -> None:
-    """Download a complete dataset as a single file (Parquet, CSV.gz, or GeoParquet).
+    """Download a dataset as a single file (Parquet, CSV, or GeoParquet).
 
-    Uses the /v1/bulk/{namespace}/{table} endpoint. Monthly snapshots for Free
-    accounts are served from Cloudflare's edge cache. Pro accounts get the
-    current Iceberg snapshot on demand.
+    Uses /v1/bulk when the dataset permits bulk export. OECD and other
+    licence-restricted datasets (e.g. nz_cpi) are downloaded via the live
+    /v1/datasets/{name}/data endpoint instead.
 
     Examples
     --------
         eolas download nz_cpi
-        eolas download nz_cpi --format csv --out cpi.csv.gz
+        eolas download nz_cpi --format csv --out cpi.csv
         eolas download nz_cpi --freshness monthly
         eolas download territorial_authority_2023 --format geoparquet
     """
@@ -413,36 +428,75 @@ def download_cmd(
             EXIT_USAGE,
         )
 
-    server_fmt = _DOWNLOAD_FORMAT_MAP[fmt_lower]
-    if out is None:
-        ext = _DOWNLOAD_EXT[server_fmt]
-        out = Path.cwd() / f"{name}{ext}"
-    else:
-        out = out.expanduser().resolve()
-
+    client = _client(api_key)
+    use_live = False
     try:
-        result_path = _client(api_key).download_bulk(
-            name,
-            freshness=freshness,
-            format=server_fmt,
-            path=out,
-            progress=False if no_progress else None,
-        )
-    except BulkUpgradeRequired as e:
-        err_console.print(f"[red]error:[/red] {e}")
-        err_console.print("[dim]→ https://eolas.fyi/pricing[/dim]")
-        raise typer.Exit(code=EXIT_AUTH)
-    except BulkLicenceRestricted as e:
-        err_console.print(f"[red]error:[/red] {e}")
-        err_console.print(
-            "[dim]Use `eolas get` to query this dataset via the live API instead.[/dim]"
-        )
-        raise typer.Exit(code=EXIT_AUTH)
-    except BulkNotYetAvailable as e:
-        err_console.print(f"[yellow]unavailable:[/yellow] {e}")
-        raise typer.Exit(code=EXIT_API)
+        meta = client.info(name)
+        # Only OECD/licence-blocked datasets (bulk_export_class=none) use the
+        # live /data path by default. Missing field → bulk (same as download_bulk).
+        use_live = (meta.get("bulk_export_class") or "").lower() == "none"
     except EolasError as e:
         _bail(str(e), _exit_for(e))
+
+    if use_live:
+        if freshness != "auto":
+            err_console.print(
+                "[yellow]note:[/yellow] --freshness is ignored for live API downloads "
+                "(bulk snapshots are not available for this dataset)."
+            )
+        live_fmt = _LIVE_DOWNLOAD_FORMAT_MAP[fmt_lower]
+        reported_fmt = live_fmt
+        if out is None:
+            out = Path.cwd() / f"{name}{_LIVE_DOWNLOAD_EXT[fmt_lower]}"
+        else:
+            out = out.expanduser().resolve()
+        try:
+            result_path = client.download(
+                name,
+                path=out,
+                format=live_fmt,
+                progress=False if no_progress else None,
+            )
+        except EolasError as e:
+            _bail(str(e), _exit_for(e))
+    else:
+        server_fmt = _DOWNLOAD_FORMAT_MAP[fmt_lower]
+        reported_fmt = server_fmt
+        if out is None:
+            ext = _DOWNLOAD_EXT[server_fmt]
+            out = Path.cwd() / f"{name}{ext}"
+        else:
+            out = out.expanduser().resolve()
+
+        try:
+            result_path = client.download_bulk(
+                name,
+                freshness=freshness,
+                format=server_fmt,
+                path=out,
+                progress=False if no_progress else None,
+            )
+        except BulkUpgradeRequired as e:
+            err_console.print(f"[red]error:[/red] {e}")
+            err_console.print("[dim]→ https://eolas.fyi/pricing[/dim]")
+            raise typer.Exit(code=EXIT_AUTH)
+        except BulkLicenceRestricted:
+            live_fmt = _LIVE_DOWNLOAD_FORMAT_MAP[fmt_lower]
+            reported_fmt = live_fmt
+            try:
+                result_path = client.download(
+                    name,
+                    path=out,
+                    format=live_fmt,
+                    progress=False if no_progress else None,
+                )
+            except EolasError as e:
+                _bail(str(e), _exit_for(e))
+        except BulkNotYetAvailable as e:
+            err_console.print(f"[yellow]unavailable:[/yellow] {e}")
+            raise typer.Exit(code=EXIT_API)
+        except EolasError as e:
+            _bail(str(e), _exit_for(e))
 
     size_bytes = result_path.stat().st_size
     if size_bytes >= 1_048_576:
@@ -465,7 +519,7 @@ def download_cmd(
             json.dumps({
                 "path": str(result_path),
                 "bytes": size_bytes,
-                "format": server_fmt,
+                "format": reported_fmt,
                 "freshness": freshness,
             })
         )

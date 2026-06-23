@@ -455,6 +455,54 @@ def test_integration_403_raises_authentication_error_with_server_detail(client):
 
 
 # ---------------------------------------------------------------------------
+# Client.download() — live /v1/datasets/{name}/data
+# ---------------------------------------------------------------------------
+
+FAKE_CSV = b"date,period,value\n2023-01-01,2023Q1,100.0\n"
+
+
+@resp_lib.activate
+def test_download_live_writes_csv(client, tmp_path):
+    resp_lib.add(
+        resp_lib.GET,
+        f"{BASE}/v1/datasets/nz_cpi/data",
+        body=FAKE_CSV,
+        content_type="text/csv",
+        status=200,
+    )
+    dest = tmp_path / "nz_cpi.csv"
+    result = client.download("nz_cpi", path=dest)
+    import pathlib
+    assert isinstance(result, pathlib.Path)
+    assert result.read_bytes() == FAKE_CSV
+
+
+@resp_lib.activate
+def test_download_live_sends_limit_zero_for_full_dataset(client, tmp_path):
+    resp_lib.add(
+        resp_lib.GET,
+        f"{BASE}/v1/datasets/nz_cpi/data",
+        body=FAKE_CSV,
+        content_type="text/csv",
+        status=200,
+    )
+    client.download("nz_cpi", path=tmp_path / "nz_cpi.csv")
+    assert "limit=0" in resp_lib.calls[0].request.url
+
+
+@resp_lib.activate
+def test_download_live_returns_bytes_when_no_path(client):
+    resp_lib.add(
+        resp_lib.GET,
+        f"{BASE}/v1/datasets/nz_cpi/data",
+        body=FAKE_CSV,
+        content_type="text/csv",
+        status=200,
+    )
+    assert client.download("nz_cpi") == FAKE_CSV
+
+
+# ---------------------------------------------------------------------------
 # Client.download_bulk() — /v1/bulk/{namespace}/{table}
 # ---------------------------------------------------------------------------
 

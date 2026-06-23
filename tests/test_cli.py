@@ -597,7 +597,10 @@ def test_download_csv_format(tmp_path, monkeypatch):
                                  "--format", "csv", "--api-key", "k"])
     assert result.exit_code == 0
     assert (tmp_path / "nz_cpi.csv.gz").exists()
-    bulk_req = resp_lib.calls[1].request
+    bulk_req = next(
+        c.request for c in resp_lib.calls
+        if "/v1/bulk/" in c.request.url
+    )
     assert "format=csv_gz" in bulk_req.url
 
 
@@ -617,18 +620,21 @@ def test_download_402_exits_auth_code(tmp_path, monkeypatch):
 
 
 @resp_lib.activate
-def test_download_403_licence_exits_auth_code(tmp_path, monkeypatch):
-    """HTTP 403 licence restriction should exit with EXIT_AUTH."""
+def test_download_403_licence_falls_back_to_live_api(tmp_path, monkeypatch):
+    """bulk_export_class=none uses live /data; bulk 403 also falls back."""
+    live_csv = b"date,period,value\n2023-01-01,2023Q1,100.0\n"
     resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/oecd_gdp",
                  json={**BULK_DATASET_META, "name": "oecd_gdp",
-                       "namespace": "oecd", "table": "oecd_gdp"},
+                       "namespace": "oecd", "table": "oecd_gdp",
+                       "bulk_export_class": "none"},
                  status=200)
-    resp_lib.add(resp_lib.GET, f"{BASE}/v1/bulk/oecd/oecd_gdp",
-                 json={"detail": "This dataset is not available as a bulk download (licence: OECD)."},
-                 status=403)
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/oecd_gdp/data",
+                 body=live_csv, content_type="text/csv", status=200)
     monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["download", "oecd_gdp", "--api-key", "k"])
-    assert result.exit_code == cli_module.EXIT_AUTH
+    result = runner.invoke(app, ["download", "oecd_gdp",
+                                 "--format", "csv", "--api-key", "k"])
+    assert result.exit_code == 0
+    assert (tmp_path / "oecd_gdp.csv").read_bytes() == live_csv
 
 
 @resp_lib.activate
