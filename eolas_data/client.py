@@ -28,6 +28,7 @@ from .exceptions import (
     BulkUpgradeRequired,
     ChangesLicenceRestricted,
     ChangesUpgradeRequired,
+    EolasError,
     NotFoundError,
     RateLimitError,
     WatermarkExpired,
@@ -42,12 +43,44 @@ from ._dataset_names import DatasetName  # noqa: F401  (public re-export)
 
 BASE_URL = "https://api.eolas.fyi"
 
+# (connect, read) seconds. The read timeout is per-socket-read, so a large
+# streaming download is fine as long as bytes keep flowing — it only trips when
+# the server goes silent for 300s. A black-holed connection now raises instead
+# of hanging the caller forever (EH-1).
+_DEFAULT_TIMEOUT = (10, 300)
+
+
+class _TimeoutSession(requests.Session):
+    """A ``requests.Session`` that applies a default timeout to every request.
+
+    Single seam so ``get``/``head``/``post`` — and any future call site — carry
+    a timeout without threading it through each call. A per-call ``timeout=``
+    still wins via ``setdefault``.
+    """
+
+    def __init__(self, timeout):
+        super().__init__()
+        self._default_timeout = timeout
+
+    def request(self, *args, **kwargs):  # type: ignore[override]
+        kwargs.setdefault("timeout", self._default_timeout)
+        try:
+            return super().request(*args, **kwargs)
+        except requests.RequestException as exc:
+            # Transport-level failure (connection refused, DNS, timeout, reset):
+            # turn the raw urllib3/requests traceback into a typed EolasError so
+            # callers (and the CLI's EolasError handler) get a clean message
+            # instead of a stack dump (EH-2). HTTP status errors don't come
+            # through here — the client inspects resp.status_code directly.
+            raise EolasError(f"Network error talking to api.eolas.fyi: {exc}") from exc
+
+
 _SIDECAR_SCHEMA_VERSION = 1
 _SIDECAR_SCHEMA_VERSION_CDC = 2
 
 # OS-keyring constants — service name must match the R client so a key set
 # from one language is readable from the other.
-_KEYRING_SERVICE  = "eolas"
+_KEYRING_SERVICE = "eolas"
 _KEYRING_USERNAME = "api-key"
 
 
@@ -64,6 +97,7 @@ def _keyring_get() -> str:
     """
     try:
         import keyring as _kr
+
         value = _kr.get_password(_KEYRING_SERVICE, _KEYRING_USERNAME)
         return value or ""
     except Exception:
@@ -147,8 +181,12 @@ def _to_geodataframe(df: "pd.DataFrame", force: bool = False):
             )
         return None
 
-    geom = df["geometry_wkt"].apply(lambda s: _wkt.loads(s) if isinstance(s, str) and s else None)
-    gdf = gpd.GeoDataFrame(df.drop(columns=["geometry_wkt"]), geometry=geom, crs="EPSG:4326")
+    geom = df["geometry_wkt"].apply(
+        lambda s: _wkt.loads(s) if isinstance(s, str) and s else None
+    )
+    gdf = gpd.GeoDataFrame(
+        df.drop(columns=["geometry_wkt"]), geometry=geom, crs="EPSG:4326"
+    )
     src_attrs = getattr(df, "attrs", None)
     for attr in ("eolas_name", "eolas_source", "eolas_meta", "eolas_columns"):
         if isinstance(src_attrs, dict) and attr in src_attrs:
@@ -191,6 +229,7 @@ class Client:
         api_key: Optional[str] = None,
         base_url: str = BASE_URL,
         cache: bool = False,
+        timeout: tuple[float, float] | float = _DEFAULT_TIMEOUT,
     ):
         # Precedence: explicit arg → EOLAS_API_KEY env var → OS keyring →
         # ~/.eolas/config.json → "". The config-file step mirrors the CLI's
@@ -202,21 +241,25 @@ class Client:
             or _config_file_get()
             or ""
         )
-        self._base  = base_url.rstrip("/")
+        self._base = base_url.rstrip("/")
         self._cache: dict | None = {} if cache else None
-        self._session = requests.Session()
+        self._timeout = timeout
+        self._session = _TimeoutSession(timeout)
         # Explicit User-Agent: good API-client hygiene, and insulation against
         # the Cloudflare edge tightening bot rules (raw default UAs can be
         # 403'd by managed rulesets — a custom UA is always allowed).
         try:
             import importlib.metadata as _md
+
             _ver = _md.version("eolas-data")
         except Exception:
             _ver = "1.0.0"
-        self._session.headers.update({
-            "X-API-Key": self._key,
-            "User-Agent": f"eolas-data/{_ver} (python; +https://eolas.fyi)",
-        })
+        self._session.headers.update(
+            {
+                "X-API-Key": self._key,
+                "User-Agent": f"eolas-data/{_ver} (python; +https://eolas.fyi)",
+            }
+        )
         # Tri-state Arrow capability memo: None=unknown (try it), True=server
         # speaks Arrow (keep using it), False=server ignored format=arrow
         # (old server — go straight to JSON, don't waste a round-trip retrying
@@ -226,7 +269,7 @@ class Client:
 
     def __repr__(self) -> str:
         masked = self._key[:8] + "..." if len(self._key) > 8 else self._key
-        cache  = " cache=on" if self._cache is not None else ""
+        cache = " cache=on" if self._cache is not None else ""
         return f"<eolas_data.Client key={masked!r}{cache}>"
 
     # ------------------------------------------------------------------
@@ -361,16 +404,16 @@ class Client:
     # ------------------------------------------------------------------
 
     _BULK_EXTENSIONS = {
-        "parquet":    ".parquet",
-        "csv_gz":     ".csv.gz",
+        "parquet": ".parquet",
+        "csv_gz": ".csv.gz",
         "geoparquet": ".geo.parquet",
     }
     _LIVE_DOWNLOAD_FORMATS = {"csv", "parquet", "arrow", "json"}
     _LIVE_DOWNLOAD_EXTENSIONS = {
-        "csv":     ".csv",
+        "csv": ".csv",
         "parquet": ".parquet",
-        "arrow":   ".arrow",
-        "json":    ".json",
+        "arrow": ".arrow",
+        "json": ".json",
     }
     # Mirrors the API guard in datasets.py — unbounded live pulls on datasets
     # above this row count (or with geometry) return HTTP 413.
@@ -384,7 +427,10 @@ class Client:
     def _live_pull_blocked(cls, meta: dict) -> bool:
         """True when limit=0 with no date bounds would hit the API 413 guard."""
         row_count = int(meta.get("row_count_at_last_refresh") or 0)
-        return bool(meta.get("has_geometry")) or row_count > cls._LARGE_DATASET_ROW_THRESHOLD
+        return (
+            bool(meta.get("has_geometry"))
+            or row_count > cls._LARGE_DATASET_ROW_THRESHOLD
+        )
 
     @staticmethod
     def _require_bulk_export(meta: dict, name: Union[str, "DatasetName"]) -> None:
@@ -485,7 +531,7 @@ class Client:
         meta = self._get(f"/v1/datasets/{name}")
         self._require_bulk_export(meta, name)
         namespace = meta.get("namespace") or ""
-        table     = meta.get("table") or meta.get("name") or name
+        table = meta.get("table") or meta.get("name") or name
         if not namespace:
             raise NotFoundError(
                 f"Dataset {name!r} metadata did not include a namespace field. "
@@ -510,7 +556,8 @@ class Client:
         resp = self._raw_bulk_get(bulk_path, params=params, stream=True)
         total = int(resp.headers.get("Content-Length", 0)) or None
         self._stream_to_file_with_progress(
-            resp, out,
+            resp,
+            out,
             total_bytes=total,
             label=f"Downloading {out.name}",
             show_progress=show,
@@ -530,10 +577,12 @@ class Client:
     ) -> "Union[pathlib.Path, bytes]":
         """Download a dataset via the live ``/v1/datasets/{name}/data`` endpoint.
 
-        Works for **all** datasets — including OECD and other licence-restricted
-        tables where bulk export is unavailable (e.g. ``nz_cpi``). For whole-dataset
-        pulls on very large or geospatial tables, prefer :meth:`download_bulk` when
-        bulk export is permitted.
+        This is the **live** path. It suits small/medium tabular datasets and any
+        table where bulk export is unavailable (e.g. OECD ``nz_cpi``). It does
+        **not** auto-route: a whole-dataset pull (``limit=None``) on a >100k-row or
+        geospatial table is refused by the API with HTTP 413 — the same guard
+        :meth:`get` transparently satisfies from the bulk cache. For those tables
+        use :meth:`download_bulk` (when bulk export is permitted) or :meth:`get`.
 
         Args:
             name: Dataset identifier, e.g. ``"nz_cpi"``.
@@ -568,6 +617,7 @@ class Client:
             params["end"] = end
         if limit is not None:
             from .rows import resolve_fetch_limit
+
             fetch_limit, _ = resolve_fetch_limit(limit)
             params["limit"] = fetch_limit
         elif start is None and end is None:
@@ -586,11 +636,14 @@ class Client:
 
         show = self._resolve_show_progress(progress, "download")
         resp = self._raw_get(
-            f"/v1/datasets/{name}/data", params=params, stream=True,
+            f"/v1/datasets/{name}/data",
+            params=params,
+            stream=True,
         )
         total = int(resp.headers.get("Content-Length", 0)) or None
         self._stream_to_file_with_progress(
-            resp, out,
+            resp,
+            out,
             total_bytes=total,
             label=f"Downloading {out.name}",
             show_progress=show,
@@ -704,7 +757,7 @@ class Client:
         meta = self._get(f"/v1/datasets/{name}")
         self._require_bulk_export(meta, name)
         namespace = meta.get("namespace") or ""
-        table     = meta.get("table") or meta.get("name") or name
+        table = meta.get("table") or meta.get("name") or name
         if not namespace:
             raise NotFoundError(
                 f"Dataset {name!r} metadata did not include a namespace field. "
@@ -747,7 +800,8 @@ class Client:
             resp = self._raw_bulk_get(bulk_path, params=params, stream=True)
             total = int(resp.headers.get("Content-Length", 0)) or None
             bytes_dl = self._stream_to_file_with_progress(
-                resp, tmp,
+                resp,
+                tmp,
                 total_bytes=total,
                 label=f"Downloading {out.name}",
                 show_progress=show,
@@ -776,8 +830,12 @@ class Client:
             "snapshot_id": current_sid,
             "format": fmt,
             "freshness": freshness,
-            "downloaded_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "source_url": canonical_url + "?" + "&".join(f"{k}={v}" for k, v in params.items()),
+            "downloaded_at": datetime.datetime.now(datetime.timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            ),
+            "source_url": canonical_url
+            + "?"
+            + "&".join(f"{k}={v}" for k, v in params.items()),
         }
         sidecar.write_text(json.dumps(sidecar_data, indent=2) + "\n")
 
@@ -1018,6 +1076,7 @@ class Client:
 
         # Read the local file.
         import pyarrow.parquet as _pq
+
         if out.exists():
             local_df = _pq.read_table(str(out)).to_pandas()
         else:
@@ -1032,6 +1091,7 @@ class Client:
 
         # Atomic write.
         from .cdc import df_to_parquet_bytes
+
         out.parent.mkdir(parents=True, exist_ok=True)
         tmp = out.with_suffix(out.suffix + f".eolas-tmp-{os.urandom(4).hex()}")
         try:
@@ -1128,7 +1188,9 @@ class Client:
         tier = meta.get("cdc_serving_tier", "snapshot") or "snapshot"
 
         if tier == "changelog":
-            return self.sync_changes(name, path, format=format, progress=progress, force=force)
+            return self.sync_changes(
+                name, path, format=format, progress=progress, force=force
+            )
         else:
             result = self.sync_bulk(
                 name,
@@ -1187,6 +1249,7 @@ class Client:
 
             if row_count > 0 and resp.content:
                 from .cdc import read_parquet_bytes
+
                 page_df = read_parquet_bytes(resp.content)
                 pages.append(page_df)
 
@@ -1251,8 +1314,16 @@ class Client:
         if resp.status_code == 410:
             try:
                 body = resp.json()
-                min_seq = int(body.get("min_available_seq", 0))
-                detail = body.get("error", "watermark_expired")
+                # FastAPI serialises HTTPException(detail={...}) as
+                # {"detail": {"error": ..., "min_available_seq": ...}} — the
+                # fields nest one level down. Reading them at top level made
+                # min_available_seq always 0 (DRIFT-2). Fall back to top level
+                # in case the server ever flattens the shape.
+                payload = body.get("detail", body)
+                if not isinstance(payload, dict):
+                    payload = body
+                min_seq = int(payload.get("min_available_seq", 0))
+                detail = payload.get("error", "watermark_expired")
             except Exception:
                 min_seq = 0
                 detail = "watermark_expired"
@@ -1398,26 +1469,50 @@ class Client:
         """
         import tqdm.auto
 
+        # Write to a sibling tmp file and atomically rename on success (EH-5).
+        # A mid-stream reset, a short read, or a KeyboardInterrupt then leaves
+        # NO file at the final path — the caller never mistakes a truncated
+        # partial for a complete download. Mirrors the sync_bulk pattern.
+        tmp = dest.with_suffix(dest.suffix + f".eolas-tmp-{os.urandom(4).hex()}")
         bytes_written = 0
-        with tqdm.auto.tqdm(
-            total=total_bytes,
-            unit="B",
-            unit_scale=True,
-            unit_divisor=1024,
-            desc=label,
-            file=sys.stderr,
-            dynamic_ncols=True,
-            disable=not show_progress,
-            leave=True,
-        ) as bar:
-            with dest.open("wb") as fh:
-                # 1 MiB chunks: responsive bar updates (bar refreshes ~once per
-                # MiB) without excessive syscall overhead on large files.
-                for chunk in resp.iter_content(chunk_size=1024 * 1024):
-                    if chunk:
-                        fh.write(chunk)
-                        bar.update(len(chunk))
-                        bytes_written += len(chunk)
+        try:
+            with tqdm.auto.tqdm(
+                total=total_bytes,
+                unit="B",
+                unit_scale=True,
+                unit_divisor=1024,
+                desc=label,
+                file=sys.stderr,
+                dynamic_ncols=True,
+                disable=not show_progress,
+                leave=True,
+            ) as bar:
+                with tmp.open("wb") as fh:
+                    # 1 MiB chunks: responsive bar updates (bar refreshes ~once
+                    # per MiB) without excessive syscall overhead on large files.
+                    try:
+                        for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                            if chunk:
+                                fh.write(chunk)
+                                bar.update(len(chunk))
+                                bytes_written += len(chunk)
+                    except requests.RequestException as exc:
+                        raise EolasError(
+                            f"Network error while downloading from api.eolas.fyi: {exc}"
+                        ) from exc
+            # Verify the whole body arrived before publishing the file. A server
+            # that closes early without a transport error is otherwise silent.
+            # (Compressed transfers decode to >= Content-Length, so this never
+            # false-positives; chunked responses have total_bytes=None.)
+            if total_bytes is not None and bytes_written < total_bytes:
+                raise EolasError(
+                    f"Truncated download: wrote {bytes_written} of {total_bytes} "
+                    f"bytes for {dest.name}. The file was not saved."
+                )
+            os.replace(tmp, dest)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
         return bytes_written
 
     def _head_snapshot_version(self, url: str, params: Optional[dict] = None) -> str:
@@ -1453,7 +1548,7 @@ class Client:
         When ``stream=True`` the response body is not eagerly downloaded —
         callers use :meth:`_stream_to_file_with_progress` to consume it.
         """
-        url  = f"{self._base}{path}"
+        url = f"{self._base}{path}"
         resp = self._session.get(url, params=params, stream=stream)
         self._raise_for_bulk_status(resp)
         return resp
@@ -1471,7 +1566,7 @@ class Client:
             raise BulkUpgradeRequired(detail) if detail else BulkUpgradeRequired()
         if resp.status_code == 403:
             try:
-                body   = resp.json()
+                body = resp.json()
                 detail = body.get("detail", "")
             except Exception:
                 detail = ""
@@ -2057,6 +2152,12 @@ class Client:
             cache_path = resolve_library_dir()
         cache_path.mkdir(parents=True, exist_ok=True)
 
+        # Best-effort GC of orphaned partial downloads (>24h old) from a prior
+        # interrupted run before we write a fresh one (PY-5).
+        from .library import sweep_stale_tmp_files
+
+        sweep_stale_tmp_files(cache_path)
+
         # ---- auto-detect format if not specified -----------------------------
         info_meta: Optional[dict] = None
         if format is None or meta:
@@ -2070,7 +2171,11 @@ class Client:
                 wkt = (info_meta or {}).get("geometry_wkt")
                 gt_truthy = bool(gt) and gt != "none"
                 wkt_truthy = bool(wkt) and wkt != "none"
-                is_geo = gt_truthy or wkt_truthy or bool((info_meta or {}).get("has_geometry"))
+                is_geo = (
+                    gt_truthy
+                    or wkt_truthy
+                    or bool((info_meta or {}).get("has_geometry"))
+                )
             except Exception:
                 is_geo = False
             fmt = "geoparquet" if is_geo else "parquet"
@@ -2088,8 +2193,12 @@ class Client:
 
         # ---- sync (download if needed, HEAD check if cached) -----------------
         self.sync_bulk(
-            name, path=file_path, format=fmt, freshness=freshness,
-            progress=progress, force=force,
+            name,
+            path=file_path,
+            format=fmt,
+            freshness=freshness,
+            progress=progress,
+            force=force,
         )
 
         show_read = self._resolve_show_progress(progress, "read")
@@ -2098,11 +2207,14 @@ class Client:
         # ---- read the local file into a DataFrame ----------------------------
         if as_arrow:
             import pyarrow.parquet as _pq
+
             with self._with_read_progress(read_label, show_read):
                 if fmt == "csv_gz":
                     import pyarrow as _pa
+
                     return _pa.Table.from_pandas(
-                        pd.read_csv(file_path), preserve_index=False,
+                        pd.read_csv(file_path),
+                        preserve_index=False,
                     )
                 return _pq.read_table(file_path)
 
@@ -2113,6 +2225,7 @@ class Client:
                 if bulk_fmt == "geoparquet" and resolved_as_geo:
                     try:
                         import geopandas as gpd
+
                         return gpd.read_parquet(path)
                     except ImportError:
                         pass
@@ -2127,12 +2240,17 @@ class Client:
             if fmt in ("parquet", "geoparquet") and "histogram" in str(exc).lower():
                 _log.warning(
                     "Parquet read failed for %s (%s) — falling back to csv_gz bulk",
-                    name, exc,
+                    name,
+                    exc,
                 )
                 csv_path = cache_path / f"{name}{self._BULK_EXTENSIONS['csv_gz']}"
                 self.sync_bulk(
-                    name, path=csv_path, format="csv_gz",
-                    freshness=freshness, progress=progress, force=force,
+                    name,
+                    path=csv_path,
+                    format="csv_gz",
+                    freshness=freshness,
+                    progress=progress,
+                    force=force,
                 )
                 result = _read_bulk_file(csv_path, "csv_gz")
             else:
@@ -2225,9 +2343,7 @@ class Client:
                 "Choose one."
             )
         if envelope and (format != "json" or as_arrow):
-            raise ValueError(
-                "envelope=True requires format='json' and as_arrow=False."
-            )
+            raise ValueError("envelope=True requires format='json' and as_arrow=False.")
 
         from .meta import resolve_date_bounds
         from .rows import apply_row_limit, resolve_fetch_limit, sort_by_date
@@ -2242,6 +2358,7 @@ class Client:
             start, end, _stripped = resolve_date_bounds(_date_bounds_info, start, end)
             if _stripped:
                 import warnings
+
                 warnings.warn(
                     f"start=/end= ignored for {name!r}: this dataset has no date "
                     "filter column (not a time-series table). Use limit= for row "
@@ -2262,31 +2379,41 @@ class Client:
             and not envelope
             and not as_arrow
         ):
+            # Narrow the swallow to the ROUTING DECISION only (metadata lookup +
+            # predicates). A failure there legitimately falls through to the live
+            # path. But once we've decided to route, get_local()'s own errors
+            # (mid-download reset, corrupt parquet, licence/upgrade refusals) must
+            # PROPAGATE — otherwise a transient bulk failure silently degrades to
+            # the guaranteed 413, advising the very path that just failed. Matches
+            # R's explicit no-fallback (meta.R:267). (EH-3)
+            should_route = False
             try:
                 info_meta = self._info_cached(name)
-                if self._bulk_export_allowed(info_meta) and self._live_pull_blocked(info_meta):
-                    result = self.get_local(
-                        name,
-                        as_geo=as_geo,
-                        as_arrow=False,
-                        meta=meta,
-                        force=force,
-                        progress=progress,
-                    )
-                    if engine == "polars":
-                        try:
-                            import polars as pl
-                            return pl.from_pandas(result)
-                        except ImportError:
-                            raise ImportError(
-                                "polars is required for engine='polars'. "
-                                "Install with: pip install eolas-data[polars]"
-                            )
-                    return result
-            except (BulkLicenceRestricted, BulkUpgradeRequired, BulkNotYetAvailable):
-                raise
+                should_route = self._bulk_export_allowed(
+                    info_meta
+                ) and self._live_pull_blocked(info_meta)
             except Exception:
-                pass  # fall through to live path (e.g. metadata lookup failed)
+                should_route = False  # metadata/routing failed → live path
+            if should_route:
+                result = self.get_local(
+                    name,
+                    as_geo=as_geo,
+                    as_arrow=False,
+                    meta=meta,
+                    force=force,
+                    progress=progress,
+                )
+                if engine == "polars":
+                    try:
+                        import polars as pl
+
+                        return pl.from_pandas(result)
+                    except ImportError:
+                        raise ImportError(
+                            "polars is required for engine='polars'. "
+                            "Install with: pip install eolas-data[polars]"
+                        )
+                return result
 
         # ---- early in-memory cache check -------------------------------------
         _early_cache_key = f"{name}:{start}:{end}:{format}:{0 if limit is None else int(limit)}:{as_geo}"
@@ -2321,12 +2448,17 @@ class Client:
         provenance = None
         if format == "csv":
             from io import StringIO
-            resp = self._raw_get(f"/v1/datasets/{name}/data", params={"format": "csv", **params})
+
+            resp = self._raw_get(
+                f"/v1/datasets/{name}/data", params={"format": "csv", **params}
+            )
             provenance = resp.headers
-            df   = pd.read_csv(StringIO(resp.text))
+            df = pd.read_csv(StringIO(resp.text))
         else:
             df, provenance, data_sources = self._fetch_dataframe(
-                name, params, envelope=envelope,
+                name,
+                params,
+                envelope=envelope,
             )
             if "date" in df.columns:
                 df["date"] = pd.to_datetime(df["date"])
@@ -2339,6 +2471,7 @@ class Client:
         # geo step so geometry_wkt stays as a string column in the Arrow table.
         if as_arrow:
             import pyarrow as _pa
+
             tbl = _pa.Table.from_pandas(df, preserve_index=False)
             if self._cache is not None:
                 self._cache[cache_key] = tbl
@@ -2346,13 +2479,17 @@ class Client:
 
         result = Dataset(df)
         result = self._attach_dataset_meta(
-            result, name, meta=meta,
-            provenance=provenance, data_sources=data_sources,
+            result,
+            name,
+            meta=meta,
+            provenance=provenance,
+            data_sources=data_sources,
         )
 
         if engine == "polars":
             try:
                 import polars as pl
+
                 return pl.from_pandas(result)
             except ImportError:
                 raise ImportError(
@@ -2377,7 +2514,11 @@ class Client:
     # ------------------------------------------------------------------
 
     def _fetch_dataframe(
-        self, name, params: dict, *, envelope: bool = False,
+        self,
+        name,
+        params: dict,
+        *,
+        envelope: bool = False,
     ) -> tuple[pd.DataFrame, object, Optional[list]]:
         """Fetch dataset rows as a DataFrame, negotiating Arrow IPC over the
         wire (≈5x faster end-to-end, ≈82x faster parse than JSON on large
@@ -2393,30 +2534,47 @@ class Client:
                 params={**params, "envelope": 1},
             )
             payload = resp.json()
-            records = payload.get("data", payload) if isinstance(payload, dict) else payload
+            records = (
+                payload.get("data", payload) if isinstance(payload, dict) else payload
+            )
             sources = payload.get("data_sources") if isinstance(payload, dict) else None
             return pd.DataFrame(records), resp.headers, sources
 
         if self._arrow_supported is not False:
-            try:
-                import io
-                import pyarrow as pa  # hard dependency; guarded for resilience
+            import io
 
+            try:
+                import pyarrow as pa  # hard dependency; guarded for resilience
+            except Exception:
+                # pyarrow genuinely unavailable → permanent JSON, one nag.
+                self._arrow_supported = False
+                nag_json_transport_once()
+            else:
+                # NB: _raw_get raises typed EolasErrors (auth/404/429) which must
+                # PROPAGATE — swallowing them here fired a bogus "Arrow
+                # unavailable" nag and re-sent the same failing request as JSON,
+                # doubling load and aggravating rate limits (EH-7). We only
+                # downgrade on a non-arrow 200 or a real pyarrow/IPC decode error.
                 resp = self._raw_get(
                     f"/v1/datasets/{name}/data",
                     params={**params, "format": "arrow"},
                 )
                 if "arrow" in resp.headers.get("content-type", ""):
-                    self._arrow_supported = True
-                    tbl = pa.ipc.open_stream(io.BytesIO(resp.content)).read_all()
-                    return tbl.to_pandas(), resp.headers, None
-                # Old server ignored format=arrow and returned JSON. Remember
-                # so we don't pay the failed round-trip on every future call.
-                self._arrow_supported = False
-                nag_json_transport_once()
-            except Exception:
-                self._arrow_supported = False
-                nag_json_transport_once()
+                    try:
+                        tbl = pa.ipc.open_stream(io.BytesIO(resp.content)).read_all()
+                    except Exception:
+                        # 200 arrow body that won't decode → downgrade + fall
+                        # through to the JSON re-request below.
+                        self._arrow_supported = False
+                        nag_json_transport_once()
+                    else:
+                        self._arrow_supported = True
+                        return tbl.to_pandas(), resp.headers, None
+                else:
+                    # Old server ignored format=arrow and returned JSON 200.
+                    # Remember so we don't pay the round-trip on every call.
+                    self._arrow_supported = False
+                    nag_json_transport_once()
 
         resp = self._raw_get(f"/v1/datasets/{name}/data", params=params)
         data = resp.json()
@@ -2434,7 +2592,7 @@ class Client:
         *,
         stream: bool = False,
     ) -> requests.Response:
-        url  = f"{self._base}{path}"
+        url = f"{self._base}{path}"
         resp = self._session.get(url, params=params, stream=stream)
         self._raise_for_status(resp)
         return resp
@@ -2457,9 +2615,9 @@ class Client:
             raise AuthenticationError(detail)
         if resp.status_code == 429:
             h = resp.headers
-            limit  = h.get("X-RateLimit-Limit")
-            retry  = h.get("Retry-After")
-            reset  = h.get("X-RateLimit-Reset")
+            limit = h.get("X-RateLimit-Limit")
+            retry = h.get("Retry-After")
+            reset = h.get("X-RateLimit-Reset")
             # A 429 carrying our X-RateLimit-* headers came from the API; a 429
             # with only a cf-ray was thrown at the Cloudflare edge before origin.
             via_cf = bool(h.get("cf-ray")) and limit is None

@@ -14,6 +14,7 @@ JSON file used by the CLI for ``api_key`` storage.  ``library_dir`` is simply
 an additional key.  The R client reads the same file, so a library path set
 from Python is honoured in R and vice versa.
 """
+
 from __future__ import annotations
 
 import json
@@ -21,6 +22,7 @@ import logging
 import os
 import pathlib
 import sys
+import time
 from typing import Optional
 
 from rich.prompt import Prompt
@@ -33,7 +35,7 @@ _log = logging.getLogger("eolas_data")
 _prompt_done: bool = False
 
 # Config file (same as CLI's auth config)
-_CONFIG_DIR  = pathlib.Path.home() / ".eolas"
+_CONFIG_DIR = pathlib.Path.home() / ".eolas"
 _CONFIG_FILE = _CONFIG_DIR / "config.json"
 
 # Fallback cache directory (Step 5)
@@ -41,8 +43,8 @@ _FALLBACK_DIR = pathlib.Path.home() / ".cache" / "eolas"
 
 # Bulk file extensions (mirrors Client._BULK_EXTENSIONS).
 _BULK_EXTENSIONS = {
-    "parquet":    ".parquet",
-    "csv_gz":     ".csv.gz",
+    "parquet": ".parquet",
+    "csv_gz": ".csv.gz",
     "geoparquet": ".geo.parquet",
 }
 
@@ -50,6 +52,7 @@ _BULK_EXTENSIONS = {
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def resolve_library_dir(*, interactive: bool = True) -> pathlib.Path:
     """Return the resolved library directory, following the precedence chain.
@@ -158,10 +161,17 @@ def cache_clear(
         if name is None:
             if root.is_dir():
                 for p in root.iterdir():
-                    if p.suffix in {".parquet", ".gz"} or p.name.endswith(".geo.parquet"):
+                    if p.suffix in {".parquet", ".gz"} or p.name.endswith(
+                        ".geo.parquet"
+                    ):
                         p.unlink(missing_ok=True)
                         deleted.append(str(p))
                     elif p.name.endswith(".eolas-meta.json"):
+                        p.unlink(missing_ok=True)
+                        deleted.append(str(p))
+                    elif ".eolas-tmp-" in p.name:
+                        # Orphaned partial downloads — a full library clear takes
+                        # them all regardless of age (PY-5).
                         p.unlink(missing_ok=True)
                         deleted.append(str(p))
         elif format is None:
@@ -185,6 +195,43 @@ def cache_clear(
                     deleted.append(str(candidate))
 
     return {"files": deleted, "meta_cleared": meta_n}
+
+
+def sweep_stale_tmp_files(
+    cache_dir: Optional[str | pathlib.Path] = None,
+    *,
+    older_than_hours: float = 24.0,
+) -> list[str]:
+    """Delete orphaned ``*.eolas-tmp-*`` partial-download files in the library.
+
+    A download interrupted before the atomic rename leaves a ``<name>.eolas-tmp-
+    <rand>`` file behind. These are never read (the reader only ever opens the
+    final path) and are otherwise never garbage-collected (PY-5 found a 16 MB
+    partial 16 days old). We sweep any older than ``older_than_hours`` so an
+    in-flight concurrent download's tmp file is never touched.
+
+    Returns the list of deleted paths. Never raises — best-effort cleanup.
+    """
+    deleted: list[str] = []
+    try:
+        root = (
+            pathlib.Path(cache_dir).expanduser().resolve()
+            if cache_dir is not None
+            else resolve_library_dir(interactive=False)
+        )
+        if not root.is_dir():
+            return deleted
+        cutoff = time.time() - older_than_hours * 3600
+        for p in root.glob("*.eolas-tmp-*"):
+            try:
+                if p.is_file() and p.stat().st_mtime < cutoff:
+                    p.unlink(missing_ok=True)
+                    deleted.append(str(p))
+            except OSError:
+                continue
+    except Exception:
+        pass
+    return deleted
 
 
 def library_status() -> dict:
@@ -211,10 +258,10 @@ def library_status() -> dict:
         resolved = str(_FALLBACK_DIR)
 
     return {
-        "source":       source,
-        "path":         resolved,
-        "env_var":      env,
-        "config_file":  str(_CONFIG_FILE),
+        "source": source,
+        "path": resolved,
+        "env_var": env,
+        "config_file": str(_CONFIG_FILE),
         "config_value": cfg or "",
     }
 
@@ -311,14 +358,22 @@ def _maybe_prompt() -> Optional[str]:
     )
     _console.print()
     _console.print("For reproducible pipelines, set up a library:")
-    _console.print(f"  [green]1[/green]) [path]~/eolas-library[/path]      user-wide, persistent [dim](recommended)[/dim]")
-    _console.print(f"  [green]2[/green]) [path]./eolas-library[/path]      this project")
-    _console.print( "  [green]3[/green]) Custom path")
-    _console.print( "  [green]4[/green]) Stay with [path]~/.cache/eolas[/path] [dim](don't ask again)[/dim]")
+    _console.print(
+        f"  [green]1[/green]) [path]~/eolas-library[/path]      user-wide, persistent [dim](recommended)[/dim]"
+    )
+    _console.print(
+        f"  [green]2[/green]) [path]./eolas-library[/path]      this project"
+    )
+    _console.print("  [green]3[/green]) Custom path")
+    _console.print(
+        "  [green]4[/green]) Stay with [path]~/.cache/eolas[/path] [dim](don't ask again)[/dim]"
+    )
     _console.print()
 
     try:
-        raw = Prompt.ask("Choice", choices=["1", "2", "3", "4"], default="1", console=_console)
+        raw = Prompt.ask(
+            "Choice", choices=["1", "2", "3", "4"], default="1", console=_console
+        )
     except (EOFError, KeyboardInterrupt):
         _console.print()
         return None
