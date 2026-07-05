@@ -39,6 +39,12 @@ Network-hardening + correctness release, addressing findings from the
 - **`download()` docstring corrected (PY-1).** It no longer claims to work for
   "all datasets" — it is the live path and 413s on whole-dataset pulls of
   large/geo tables; use `get()` or `download_bulk()` there.
+- **`eolas datasets list` no longer renders a blank ghost column (CLI-1).** On
+  narrow (<100 col) terminals the title column is dropped with a hint instead of
+  being squeezed to zero width.
+- **Bulk-download docs corrected (DRIFT-3).** `download_bulk()` / the CLI
+  `--freshness` help no longer claim Free plans get monthly bulk — bulk is
+  Pro/Enterprise and Free keys receive HTTP 402.
 
 ### Changed
 

@@ -467,9 +467,10 @@ class Client:
         Args:
             name: Dataset identifier, e.g. ``"nz_cpi"``.
             freshness: ``"auto"`` (default) — omit the query param so the
-                server picks the right level for your plan (Free → monthly,
-                Pro → current). ``"monthly"`` or ``"current"`` override
-                explicitly.
+                server picks the right level for your plan (Pro → current).
+                ``"monthly"`` or ``"current"`` override explicitly. Bulk
+                download is a Pro/Enterprise feature; Free keys receive HTTP
+                402 (query the dataset via :meth:`get` / :meth:`download`).
             format: ``"parquet"`` (default), ``"csv_gz"``, or ``"geoparquet"``.
                 GeoParquet is only available on geospatial datasets.
             path: Where to write the file. ``None`` (default) returns the raw

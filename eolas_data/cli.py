@@ -9,6 +9,7 @@ The CLI is a thin layer over the existing `eolas_data.Client`. All HTTP, retry,
 auth, and error-mapping behaviour stays in the Python client — the CLI only
 formats input and output.
 """
+
 from __future__ import annotations
 
 import json
@@ -26,7 +27,13 @@ import time
 
 from . import __version__
 from . import schedule as _schedule
-from .client import Client, _KEYRING_SERVICE, _KEYRING_USERNAME, _keyring_get
+from .client import (
+    Client,
+    SyncResult,
+    _KEYRING_SERVICE,
+    _KEYRING_USERNAME,
+    _keyring_get,
+)
 from .library import library_clear, library_set, library_status
 from .exceptions import (
     APIError,
@@ -34,6 +41,8 @@ from .exceptions import (
     BulkLicenceRestricted,
     BulkNotYetAvailable,
     BulkUpgradeRequired,
+    ChangesLicenceRestricted,
+    ChangesUpgradeRequired,
     EolasError,
     NotFoundError,
     RateLimitError,
@@ -44,15 +53,15 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 
 # Stable, distinct exit codes — useful for shell scripts and agents that branch
 # on outcome. Documented in the README.
-EXIT_OK              = 0
-EXIT_GENERIC         = 1
-EXIT_AUTH            = 2
-EXIT_RATE_LIMIT      = 3
-EXIT_NOT_FOUND       = 4
-EXIT_API             = 5
-EXIT_USAGE           = 64  # convention from sysexits.h
+EXIT_OK = 0
+EXIT_GENERIC = 1
+EXIT_AUTH = 2
+EXIT_RATE_LIMIT = 3
+EXIT_NOT_FOUND = 4
+EXIT_API = 5
+EXIT_USAGE = 64  # convention from sysexits.h
 
-app           = typer.Typer(
+app = typer.Typer(
     name="eolas",
     help=(
         "CLI for the eolas.fyi statistical data API. Browse and fetch 1,400+ "
@@ -62,16 +71,28 @@ app           = typer.Typer(
     no_args_is_help=True,
     add_completion=True,
 )
-datasets_app  = typer.Typer(help="Browse and inspect datasets.", no_args_is_help=True)
-auth_app      = typer.Typer(help="Manage your API key (env var, OS keyring, or ~/.eolas/config.json).", no_args_is_help=True)
-schedule_app  = typer.Typer(help="Schedule recurring fetches via cron (POSIX) or Task Scheduler (Windows).", no_args_is_help=True)
-integrate_app = typer.Typer(help="Generate connector configs for third-party data-pipeline tools (Enterprise plan).", no_args_is_help=True)
-library_app   = typer.Typer(help="Manage the library directory where eolas data files are cached.", no_args_is_help=True)
-app.add_typer(datasets_app,  name="datasets")
-app.add_typer(auth_app,      name="auth")
-app.add_typer(schedule_app,  name="schedule")
+datasets_app = typer.Typer(help="Browse and inspect datasets.", no_args_is_help=True)
+auth_app = typer.Typer(
+    help="Manage your API key (env var, OS keyring, or ~/.eolas/config.json).",
+    no_args_is_help=True,
+)
+schedule_app = typer.Typer(
+    help="Schedule recurring fetches via cron (POSIX) or Task Scheduler (Windows).",
+    no_args_is_help=True,
+)
+integrate_app = typer.Typer(
+    help="Generate connector configs for third-party data-pipeline tools (Enterprise plan).",
+    no_args_is_help=True,
+)
+library_app = typer.Typer(
+    help="Manage the library directory where eolas data files are cached.",
+    no_args_is_help=True,
+)
+app.add_typer(datasets_app, name="datasets")
+app.add_typer(auth_app, name="auth")
+app.add_typer(schedule_app, name="schedule")
 app.add_typer(integrate_app, name="integrate")
-app.add_typer(library_app,   name="library")
+app.add_typer(library_app, name="library")
 
 # Errors go to stderr, data to stdout — important for piping.
 err_console = Console(stderr=True)
@@ -80,6 +101,7 @@ err_console = Console(stderr=True)
 # ────────────────────────────────────────────────────────────────────────────
 # Auth resolution
 # ────────────────────────────────────────────────────────────────────────────
+
 
 def _load_api_key() -> str:
     """Resolve the API key. Precedence: env var → OS keyring → config file → empty."""
@@ -105,6 +127,7 @@ def _client(api_key: Optional[str] = None) -> Client:
 # Output helpers
 # ────────────────────────────────────────────────────────────────────────────
 
+
 def _machine_mode(json_flag: bool) -> bool:
     """True when output should be machine-readable (NDJSON / CSV)."""
     return json_flag
@@ -126,9 +149,12 @@ def _preview_display_frame(df, *, limit: int, max_cols: int = 8):
         out = out.tail(limit).reset_index(drop=True)
     cols = list(out.columns)
     prefer = [
-        c for c in cols
-        if c == "date" or c == "value"
-        or "cpi_index" in c.lower() or c.lower().endswith("_ocr")
+        c
+        for c in cols
+        if c == "date"
+        or c == "value"
+        or "cpi_index" in c.lower()
+        or c.lower().endswith("_ocr")
         or "ocr" in c.lower()
     ]
     picked: list[str] = []
@@ -150,6 +176,7 @@ def _row_to_dict(row) -> dict:
     """Convert a pandas Series row to a JSON-friendly dict (handles NaN)."""
     try:
         import pandas as pd
+
         return {k: (None if pd.isna(v) else v) for k, v in row.items()}
     except ImportError:
         return dict(row.items())
@@ -157,10 +184,14 @@ def _row_to_dict(row) -> dict:
 
 def _exit_for(e: EolasError) -> int:
     """Map a client-library exception class to an exit code."""
-    if isinstance(e, AuthenticationError): return EXIT_AUTH
-    if isinstance(e, RateLimitError):      return EXIT_RATE_LIMIT
-    if isinstance(e, NotFoundError):       return EXIT_NOT_FOUND
-    if isinstance(e, APIError):            return EXIT_API
+    if isinstance(e, AuthenticationError):
+        return EXIT_AUTH
+    if isinstance(e, RateLimitError):
+        return EXIT_RATE_LIMIT
+    if isinstance(e, NotFoundError):
+        return EXIT_NOT_FOUND
+    if isinstance(e, APIError):
+        return EXIT_API
     return EXIT_GENERIC
 
 
@@ -173,6 +204,7 @@ def _bail(msg: str, code: int = EXIT_GENERIC) -> None:
 # Top-level commands
 # ────────────────────────────────────────────────────────────────────────────
 
+
 @app.command()
 def version() -> None:
     """Print the installed eolas-data version."""
@@ -183,6 +215,7 @@ def version() -> None:
 def health() -> None:
     """Quick reachability check against api.eolas.fyi/health."""
     import requests
+
     try:
         r = requests.get("https://api.eolas.fyi/health", timeout=10)
         r.raise_for_status()
@@ -199,12 +232,19 @@ def health() -> None:
 # datasets subcommands
 # ────────────────────────────────────────────────────────────────────────────
 
+
 @datasets_app.command("list")
 def datasets_list(
-    source:   Optional[str] = typer.Option(None, "--source", "-s", help="Filter by source, e.g. 'Stats NZ', 'OECD'."),
-    search:   Optional[str] = typer.Option(None, "--search",       help="Substring match against name or title."),
-    json_out: bool          = typer.Option(False, "--json",        help="Force NDJSON output."),
-    api_key:  Optional[str] = typer.Option(None, "--api-key", envvar=None, help="Override resolved API key."),
+    source: Optional[str] = typer.Option(
+        None, "--source", "-s", help="Filter by source, e.g. 'Stats NZ', 'OECD'."
+    ),
+    search: Optional[str] = typer.Option(
+        None, "--search", help="Substring match against name or title."
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Force NDJSON output."),
+    api_key: Optional[str] = typer.Option(
+        None, "--api-key", envvar=None, help="Override resolved API key."
+    ),
 ) -> None:
     """List datasets, optionally filtered by source or search term."""
     try:
@@ -224,23 +264,36 @@ def datasets_list(
         _emit_ndjson(_row_to_dict(row) for _, row in df.iterrows())
         return
 
+    console = Console()
+    # At ~80 cols the two no_wrap columns squeeze the title column to zero width,
+    # rendering a blank-headed ghost column (CLI-1). Below a threshold, drop the
+    # title entirely and hint how to see it, mirroring the preview command.
+    show_title = console.size.width >= 100
     table = Table(title=f"{len(df)} dataset{'' if len(df) == 1 else 's'}")
-    table.add_column("name",   style="cyan",    no_wrap=True)
+    table.add_column("name", style="cyan", no_wrap=True)
     table.add_column("source", style="magenta", no_wrap=True)
-    table.add_column("title")
+    if show_title:
+        table.add_column("title", overflow="fold", min_width=20)
     for _, row in df.iterrows():
-        title = str(row.get("title") or "")
-        if len(title) > 80:
-            title = title[:77] + "..."
-        table.add_row(str(row.get("name", "")), str(row.get("source", "")), title)
-    Console().print(table)
+        cells = [str(row.get("name", "")), str(row.get("source", ""))]
+        if show_title:
+            title = str(row.get("title") or "")
+            if len(title) > 80:
+                title = title[:77] + "..."
+            cells.append(title)
+        table.add_row(*cells)
+    console.print(table)
+    if not show_title:
+        Console(stderr=True).print(
+            "[dim](title column hidden — widen the terminal or use --json)[/dim]"
+        )
 
 
 @datasets_app.command("info")
 def datasets_info(
-    name:     str,
-    json_out: bool          = typer.Option(False, "--json"),
-    api_key:  Optional[str] = typer.Option(None, "--api-key"),
+    name: str,
+    json_out: bool = typer.Option(False, "--json"),
+    api_key: Optional[str] = typer.Option(None, "--api-key"),
 ) -> None:
     """Show metadata for a single dataset."""
     try:
@@ -265,10 +318,12 @@ def datasets_info(
 
 @datasets_app.command("preview")
 def datasets_preview(
-    name:     str,
-    limit:    int           = typer.Option(10, "--limit", "-n", min=1, max=1000, help="Rows to preview."),
-    json_out: bool          = typer.Option(False, "--json"),
-    api_key:  Optional[str] = typer.Option(None, "--api-key"),
+    name: str,
+    limit: int = typer.Option(
+        10, "--limit", "-n", min=1, max=1000, help="Rows to preview."
+    ),
+    json_out: bool = typer.Option(False, "--json"),
+    api_key: Optional[str] = typer.Option(None, "--api-key"),
 ) -> None:
     """Preview the most recent N rows of a dataset."""
     try:
@@ -293,15 +348,27 @@ def datasets_preview(
 # get command — the heavy lifter (verb matches the Python client's client.get())
 # ────────────────────────────────────────────────────────────────────────────
 
+
 @app.command(name="get")
 def get_cmd(
-    name:    str,
-    start:   Optional[str]  = typer.Option(None, "--start",            help="ISO date lower bound, e.g. 2020-01-01."),
-    end:     Optional[str]  = typer.Option(None, "--end",              help="ISO date upper bound."),
-    limit:   Optional[int]  = typer.Option(None, "--limit", "-n",      help="Max rows. Default: full dataset (Pro) or the 50,000-row Free cap."),
-    fmt:     str            = typer.Option("csv", "--format", "-f",    help="Output format: csv | json | parquet."),
-    out:     Optional[Path] = typer.Option(None, "--out", "-o",        help="Write to file. Default: stdout."),
-    api_key: Optional[str]  = typer.Option(None, "--api-key"),
+    name: str,
+    start: Optional[str] = typer.Option(
+        None, "--start", help="ISO date lower bound, e.g. 2020-01-01."
+    ),
+    end: Optional[str] = typer.Option(None, "--end", help="ISO date upper bound."),
+    limit: Optional[int] = typer.Option(
+        None,
+        "--limit",
+        "-n",
+        help="Max rows. Default: full dataset (Pro) or the 50,000-row Free cap.",
+    ),
+    fmt: str = typer.Option(
+        "csv", "--format", "-f", help="Output format: csv | json | parquet."
+    ),
+    out: Optional[Path] = typer.Option(
+        None, "--out", "-o", help="Write to file. Default: stdout."
+    ),
+    api_key: Optional[str] = typer.Option(None, "--api-key"),
 ) -> None:
     """Fetch a dataset and write rows to stdout or a file.
 
@@ -315,7 +382,10 @@ def get_cmd(
     if fmt not in ("csv", "json", "parquet"):
         _bail(f"unknown --format {fmt!r}; expected csv | json | parquet", EXIT_USAGE)
     if fmt == "parquet" and out is None:
-        _bail("parquet requires --out FILE (binary cannot be safely streamed to stdout)", EXIT_USAGE)
+        _bail(
+            "parquet requires --out FILE (binary cannot be safely streamed to stdout)",
+            EXIT_USAGE,
+        )
 
     try:
         df = _client(api_key).get(name, start=start, end=end, limit=limit)
@@ -336,9 +406,7 @@ def get_cmd(
         df.to_parquet(dest, index=False)
 
     if dest:
-        Console(stderr=True).print(
-            f"[green]Wrote {len(df)} rows →[/green] {dest}"
-        )
+        Console(stderr=True).print(f"[green]Wrote {len(df)} rows →[/green] {dest}")
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -347,65 +415,72 @@ def get_cmd(
 
 # Map CLI --format aliases to the values the server (and client.download_bulk) accept.
 _DOWNLOAD_FORMAT_MAP = {
-    "parquet":    "parquet",
-    "csv":        "csv_gz",
-    "csv_gz":     "csv_gz",
+    "parquet": "parquet",
+    "csv": "csv_gz",
+    "csv_gz": "csv_gz",
     "geoparquet": "geoparquet",
 }
 
 # Live /v1/datasets/{name}/data formats when bulk export is unavailable.
 _LIVE_DOWNLOAD_FORMAT_MAP = {
-    "parquet":    "parquet",
-    "csv":        "csv",
-    "csv_gz":     "csv",
+    "parquet": "parquet",
+    "csv": "csv",
+    "csv_gz": "csv",
     "geoparquet": "parquet",
 }
 
 # Default output-file extensions for each format (used when --out is not set).
 _DOWNLOAD_EXT = {
-    "parquet":    ".parquet",
-    "csv_gz":     ".csv.gz",
+    "parquet": ".parquet",
+    "csv_gz": ".csv.gz",
     "geoparquet": ".geo.parquet",
 }
 
 _LIVE_DOWNLOAD_EXT = {
-    "parquet":    ".parquet",
-    "csv":        ".csv",
-    "csv_gz":     ".csv",
+    "parquet": ".parquet",
+    "csv": ".csv",
+    "csv_gz": ".csv",
     "geoparquet": ".parquet",
 }
 
 
 @app.command(name="download")
 def download_cmd(
-    name:        str,
-    fmt:         str           = typer.Option(
-        "parquet", "--format", "-f",
+    name: str,
+    fmt: str = typer.Option(
+        "parquet",
+        "--format",
+        "-f",
         help="Output format: parquet (default) | csv | geoparquet.",
     ),
-    freshness:   str           = typer.Option(
-        "auto", "--freshness",
+    freshness: str = typer.Option(
+        "auto",
+        "--freshness",
         help=(
-            "auto (default — server picks based on plan: Free→monthly, Pro→current) | "
-            "monthly | current"
+            "auto (default — server picks based on plan: Pro→current; bulk is "
+            "Pro-only, Free keys get 402) | monthly | current"
         ),
     ),
-    out:         Optional[Path] = typer.Option(
-        None, "--out", "-o",
+    out: Optional[Path] = typer.Option(
+        None,
+        "--out",
+        "-o",
         help=(
             "Where to write the file. Defaults to <name>.<ext> in the current directory. "
             "Binary output — cannot stream to stdout."
         ),
     ),
-    no_progress: bool           = typer.Option(
-        False, "--no-progress",
+    no_progress: bool = typer.Option(
+        False,
+        "--no-progress",
         help="Disable the download progress bar (useful when output is captured by a log collector).",
     ),
-    show_progress: bool        = typer.Option(
-        False, "--progress",
+    show_progress: bool = typer.Option(
+        False,
+        "--progress",
         help="Always show the download progress bar (even when stdout/stderr are not a TTY).",
     ),
-    api_key:     Optional[str]  = typer.Option(None, "--api-key"),
+    api_key: Optional[str] = typer.Option(None, "--api-key"),
 ) -> None:
     """Download a dataset as a single file (Parquet, CSV, or GeoParquet).
 
@@ -521,34 +596,35 @@ def download_cmd(
 
     if sys.stdout.isatty():
         Console().print(
-            f"[green]downloaded[/green] {result_path.name}  "
-            f"[dim]({size_str})[/dim]"
+            f"[green]downloaded[/green] {result_path.name}  " f"[dim]({size_str})[/dim]"
         )
         # Surface the snapshot version if the server sent it (only available
         # when we can introspect the last response, which the current
         # architecture doesn't expose — leave a placeholder for future wiring).
     else:
         sys.stdout.write(
-            json.dumps({
-                "path": str(result_path),
-                "bytes": size_bytes,
-                "format": reported_fmt,
-                "freshness": freshness,
-            })
+            json.dumps(
+                {
+                    "path": str(result_path),
+                    "bytes": size_bytes,
+                    "format": reported_fmt,
+                    "freshness": freshness,
+                }
+            )
         )
         sys.stdout.write("\n")
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# sync command — two modes:
-#   1. Pipeline mode (--library):  multi-file dataset directory (client.sync())
-#   2. Bulk-file mode (no --library): single-file HEAD-optimised sync (sync_bulk)
+# sync command — unified CDC dispatcher (client.sync()):
+#   snapshot-tier  → HEAD-check + full re-download when snapshot changes
+#   changelog-tier → incremental /changes feed merged into the local file
 # ────────────────────────────────────────────────────────────────────────────
 
 # Named duration aliases for --watch.
 _WATCH_NAMED: dict[str, int] = {
-    "hourly":  3_600,
-    "daily":  86_400,
+    "hourly": 3_600,
+    "daily": 86_400,
     "weekly": 604_800,
 }
 
@@ -582,7 +658,7 @@ def _parse_watch_duration(raw: str) -> int:
     # Unit-suffixed form: <int><suffix>
     if s and s[-1] in _WATCH_SUFFIXES:
         num_str = s[:-1]
-        suffix  = s[-1]
+        suffix = s[-1]
         try:
             n = int(num_str)
         except ValueError:
@@ -605,9 +681,7 @@ def _parse_watch_duration(raw: str) -> int:
             "or a named token: hourly, daily, weekly."
         )
     if n <= 0:
-        raise ValueError(
-            f"Invalid --watch duration {raw!r}: value must be positive."
-        )
+        raise ValueError(f"Invalid --watch duration {raw!r}: value must be positive.")
     return n
 
 
@@ -620,9 +694,61 @@ def _format_bytes(n: int) -> str:
     return f"{n} B"
 
 
+def _sync_result_payload(
+    result: SyncResult,
+    *,
+    server_fmt: str,
+    freshness: str,
+) -> dict:
+    """Machine-readable sync result for piped / scripted invocations."""
+    payload: dict = {
+        "status": result.status,
+        "path": str(result.path),
+        "bytes_downloaded": result.bytes_downloaded,
+        "sync_mode": result.sync_mode or "snapshot",
+        "format": server_fmt,
+        "freshness": freshness,
+        "previous_snapshot_id": result.previous_snapshot_id,
+        "current_snapshot_id": result.current_snapshot_id,
+    }
+    if result.sync_mode == "changelog":
+        payload["previous_seq"] = result.previous_seq
+        payload["current_seq"] = result.current_seq
+        payload["ops_applied"] = result.ops_applied
+    return payload
+
+
+def _sync_status_detail(result: SyncResult) -> str:
+    """One-line human summary of a sync result."""
+    if result.sync_mode == "changelog":
+        seq = result.current_seq
+        if result.status == "unchanged":
+            return f"unchanged (seq {seq}, 0 ops)"
+        if result.status == "downloaded":
+            size_str = _format_bytes(result.bytes_downloaded)
+            return f"downloaded changelog baseline (seq {seq}, {size_str})"
+        ops = result.ops_applied or 0
+        if result.bytes_downloaded:
+            size_str = _format_bytes(result.bytes_downloaded)
+            return f"re-baselined (seq {seq}, {size_str})"
+        return f"updated (+{ops} ops, seq {seq})"
+
+    snap_short = (
+        result.current_snapshot_id[:8]
+        if len(result.current_snapshot_id) > 8
+        else result.current_snapshot_id
+    )
+    if result.status == "unchanged":
+        return f"unchanged (snapshot {snap_short}…)"
+    size_str = _format_bytes(result.bytes_downloaded)
+    verb = "downloaded" if result.status == "downloaded" else "updated to"
+    return f"{verb} snapshot {snap_short}… ({size_str})"
+
+
 def _sync_timestamp() -> str:
     """Current local time in ISO-like format with timezone label."""
     import datetime
+
     now = datetime.datetime.now().astimezone()
     # tzname() can be None on some platforms; fall back gracefully.
     tz = now.strftime("%Z") or now.strftime("%z")
@@ -631,41 +757,54 @@ def _sync_timestamp() -> str:
 
 @app.command(name="sync")
 def sync_cmd(
-    name:        Optional[str]  = typer.Argument(
+    name: Optional[str] = typer.Argument(
         None,
         help="Dataset name to sync (e.g. nz_cpi). Required.",
     ),
-    fmt:         str            = typer.Option(
-        "parquet", "--format", "-f",
+    fmt: str = typer.Option(
+        "parquet",
+        "--format",
+        "-f",
         help="Output format: parquet (default) | csv | geoparquet.",
     ),
-    freshness:   str            = typer.Option(
-        "auto", "--freshness",
+    freshness: str = typer.Option(
+        "auto",
+        "--freshness",
         help="auto (default) | monthly | current.",
     ),
-    out:         Optional[Path] = typer.Option(
-        None, "--out", "-o",
+    out: Optional[Path] = typer.Option(
+        None,
+        "--out",
+        "-o",
         help="Where to write the file. Defaults to <name>.<ext> in the current directory.",
     ),
-    watch:       Optional[str]  = typer.Option(
-        None, "--watch",
+    watch: Optional[str] = typer.Option(
+        None,
+        "--watch",
         help="Poll on a repeating schedule, e.g. '1h', 'daily', '30m'.",
     ),
-    no_progress: bool           = typer.Option(
-        False, "--no-progress",
+    no_progress: bool = typer.Option(
+        False,
+        "--no-progress",
         help="Disable the download progress bar.",
     ),
-    api_key:     Optional[str]  = typer.Option(None, "--api-key"),
+    api_key: Optional[str] = typer.Option(None, "--api-key"),
 ) -> None:
-    """Keep a local dataset file up to date — only re-downloads when the snapshot changes.
+    """Keep a local dataset file up to date — routes on the dataset's CDC tier.
 
-    A HEAD request checks the server's X-Snapshot-Version header cheaply.
-    If the local sidecar records the same snapshot no data is transferred.
+    Snapshot-tier datasets (most tables): a HEAD request checks
+    X-Snapshot-Version; the file is re-downloaded only when the snapshot
+    changes.
+
+    Changelog-tier datasets (high-churn SCD2/append streams): the first call
+    downloads a baseline; later calls fetch only new rows from /changes and
+    merge them into the local file.
 
     Examples
     --------
         eolas sync nz_cpi
         eolas sync nz_cpi --format csv --out ~/data/cpi.csv.gz
+        eolas sync nz_building_outlines --out ~/data/buildings.parquet
         eolas sync nz_cpi --watch 1h
         eolas sync nz_cpi --watch hourly --out ~/data/cpi.parquet
     """
@@ -702,7 +841,25 @@ def sync_cmd(
         except ValueError as e:
             _bail(str(e), EXIT_USAGE)
 
-    bulk_client = _client(api_key)
+    sync_client = _client(api_key)
+
+    try:
+        tier_meta = sync_client.info(name)
+    except EolasError as e:
+        _bail(str(e), _exit_for(e))
+
+    tier = tier_meta.get("cdc_serving_tier") or "snapshot"
+    if tier == "changelog":
+        if server_fmt != "parquet":
+            _bail(
+                f"{name!r} is changelog-tier CDC — only --format parquet is supported.",
+                EXIT_USAGE,
+            )
+        if freshness != "auto":
+            err_console.print(
+                "[yellow]note:[/yellow] --freshness is ignored for changelog-tier "
+                "datasets (baseline always uses the current snapshot)."
+            )
 
     # In watch mode progress bars are always disabled — each iteration is a
     # scripted background check and a fresh bar per poll would spam the log.
@@ -714,7 +871,7 @@ def sync_cmd(
 
     def _run_once() -> None:
         try:
-            result = bulk_client.sync_bulk(
+            result = sync_client.sync(
                 name,
                 path=out,
                 format=server_fmt,
@@ -725,7 +882,17 @@ def sync_cmd(
             err_console.print(f"[red]error:[/red] {e}")
             err_console.print("[dim]→ https://eolas.fyi/pricing[/dim]")
             raise typer.Exit(code=EXIT_AUTH)
+        except ChangesUpgradeRequired as e:
+            err_console.print(f"[red]error:[/red] {e}")
+            err_console.print("[dim]→ https://eolas.fyi/pricing[/dim]")
+            raise typer.Exit(code=EXIT_AUTH)
         except BulkLicenceRestricted as e:
+            err_console.print(f"[red]error:[/red] {e}")
+            err_console.print(
+                "[dim]Use `eolas get` to query this dataset via the live API instead.[/dim]"
+            )
+            raise typer.Exit(code=EXIT_AUTH)
+        except ChangesLicenceRestricted as e:
             err_console.print(f"[red]error:[/red] {e}")
             err_console.print(
                 "[dim]Use `eolas get` to query this dataset via the live API instead.[/dim]"
@@ -734,51 +901,27 @@ def sync_cmd(
         except BulkNotYetAvailable as e:
             err_console.print(f"[yellow]unavailable:[/yellow] {e}")
             raise typer.Exit(code=EXIT_API)
+        except ValueError as e:
+            _bail(str(e), EXIT_USAGE)
         except EolasError as e:
             _bail(str(e), _exit_for(e))
 
+        detail = _sync_status_detail(result)
         if interval_secs is not None:
-            # Watch mode: one line per iteration.
             ts = _sync_timestamp()
-            snap_short = result.current_snapshot_id[:8] if len(result.current_snapshot_id) > 8 else result.current_snapshot_id
-            if result.status == "unchanged":
-                Console().print(
-                    f"[dim][{ts}][/dim] unchanged "
-                    f"(snapshot {snap_short}…)"
-                )
-            else:
-                size_str = _format_bytes(result.bytes_downloaded)
-                verb = "downloaded" if result.status == "downloaded" else "updated to"
-                Console().print(
-                    f"[dim][{ts}][/dim] [green]{verb}[/green] snapshot "
-                    f"{snap_short}… ({size_str})"
-                )
+            colour = "dim" if result.status == "unchanged" else "green"
+            Console().print(f"[dim][{ts}][/dim] [{colour}]{detail}[/{colour}]")
         elif sys.stdout.isatty():
-            # Single-run, interactive mode.
-            if result.status == "unchanged":
-                Console().print(
-                    f"[green]unchanged[/green] {out.name}  "
-                    f"[dim](snapshot {result.current_snapshot_id[:16]}…)[/dim]"
-                )
-            else:
-                size_str = _format_bytes(result.bytes_downloaded)
-                verb = "downloaded" if result.status == "downloaded" else "updated"
-                Console().print(
-                    f"[green]{verb}[/green] {out.name}  "
-                    f"[dim]({size_str})[/dim]"
-                )
+            Console().print(f"[green]{detail}[/green]  {out.name}")
         else:
-            # Single-run, machine mode.
             sys.stdout.write(
-                json.dumps({
-                    "status": result.status,
-                    "path": str(result.path),
-                    "bytes_downloaded": result.bytes_downloaded,
-                    "previous_snapshot_id": result.previous_snapshot_id,
-                    "current_snapshot_id": result.current_snapshot_id,
-                    "format": server_fmt,
-                    "freshness": freshness,
-                })
+                json.dumps(
+                    _sync_result_payload(
+                        result,
+                        server_fmt=server_fmt,
+                        freshness=freshness,
+                    )
+                )
             )
             sys.stdout.write("\n")
 
@@ -813,6 +956,7 @@ def sync_cmd(
 # auth subcommands
 # ────────────────────────────────────────────────────────────────────────────
 
+
 def _mask(key: str) -> str:
     if not key:
         return "(none)"
@@ -822,7 +966,10 @@ def _mask(key: str) -> str:
 @auth_app.command("set-key")
 def auth_set_key(
     api_key: str = typer.Option(
-        ..., "--key", prompt="API key", hide_input=True,
+        ...,
+        "--key",
+        prompt="API key",
+        hide_input=True,
         help="Your eolas.fyi API key. Will be saved to ~/.eolas/config.json (chmod 600).",
     ),
 ) -> None:
@@ -921,7 +1068,9 @@ def auth_status() -> None:
         return
     kr = _keyring_get()
     if kr:
-        typer.echo(f"key:    {_mask(kr)}\nsource: OS keyring (service={_KEYRING_SERVICE!r})")
+        typer.echo(
+            f"key:    {_mask(kr)}\nsource: OS keyring (service={_KEYRING_SERVICE!r})"
+        )
         return
     if CONFIG_FILE.exists():
         try:
@@ -953,10 +1102,12 @@ def auth_clear() -> None:
 # schedule subcommands — cron (POSIX) / Task Scheduler (Windows)
 # ────────────────────────────────────────────────────────────────────────────
 
+
 def _resolve_eolas_path() -> str:
     """Find the absolute path to the `eolas` binary, for use inside cron lines.
     cron runs with a minimal PATH so we can't rely on `eolas` resolving."""
     import shutil as _shutil
+
     p = _shutil.which("eolas")
     if not p:
         # Fallback: invoke the python module directly (works even if the script
@@ -972,18 +1123,39 @@ def _config_or_env_set() -> bool:
 
 @schedule_app.command("add")
 def schedule_add(
-    name:     str,
-    out:      Path           = typer.Option(..., "--out", "-o", help="Where to write the fetched data on each run. REQUIRED — cron jobs have no terminal."),
-    interval: Optional[str]  = typer.Option(None, "--interval", help="hourly | daily | weekly | monthly. Default: daily."),
-    cron:     Optional[str]  = typer.Option(None, "--cron",     help="Custom cron expression, e.g. '0 6 * * 1'. POSIX only. Mutually exclusive with --interval."),
-    fmt:      str            = typer.Option("csv", "--format", "-f", help="csv | json | parquet."),
-    start:    Optional[str]  = typer.Option(None, "--start"),
-    end:      Optional[str]  = typer.Option(None, "--end"),
-    daily:    bool           = typer.Option(False, "--daily",   help="Shortcut for --interval daily."),
-    weekly:   bool           = typer.Option(False, "--weekly",  help="Shortcut for --interval weekly."),
-    hourly:   bool           = typer.Option(False, "--hourly",  help="Shortcut for --interval hourly."),
-    monthly:  bool           = typer.Option(False, "--monthly", help="Shortcut for --interval monthly."),
-    dry_run:  bool           = typer.Option(False, "--dry-run", help="Print what would be installed; don't touch crontab/Task Scheduler."),
+    name: str,
+    out: Path = typer.Option(
+        ...,
+        "--out",
+        "-o",
+        help="Where to write the fetched data on each run. REQUIRED — cron jobs have no terminal.",
+    ),
+    interval: Optional[str] = typer.Option(
+        None, "--interval", help="hourly | daily | weekly | monthly. Default: daily."
+    ),
+    cron: Optional[str] = typer.Option(
+        None,
+        "--cron",
+        help="Custom cron expression, e.g. '0 6 * * 1'. POSIX only. Mutually exclusive with --interval.",
+    ),
+    fmt: str = typer.Option("csv", "--format", "-f", help="csv | json | parquet."),
+    start: Optional[str] = typer.Option(None, "--start"),
+    end: Optional[str] = typer.Option(None, "--end"),
+    daily: bool = typer.Option(False, "--daily", help="Shortcut for --interval daily."),
+    weekly: bool = typer.Option(
+        False, "--weekly", help="Shortcut for --interval weekly."
+    ),
+    hourly: bool = typer.Option(
+        False, "--hourly", help="Shortcut for --interval hourly."
+    ),
+    monthly: bool = typer.Option(
+        False, "--monthly", help="Shortcut for --interval monthly."
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Print what would be installed; don't touch crontab/Task Scheduler.",
+    ),
 ) -> None:
     """Schedule a recurring fetch. Defaults to daily at 06:00 local time.
 
@@ -1000,15 +1172,25 @@ def schedule_add(
         )
 
     # ----- collapse interval flags ----------------------------------------
-    flag_count = sum([daily, weekly, hourly, monthly, interval is not None, cron is not None])
+    flag_count = sum(
+        [daily, weekly, hourly, monthly, interval is not None, cron is not None]
+    )
     if flag_count > 1:
-        _bail("only one of --hourly/--daily/--weekly/--monthly/--interval/--cron may be set", EXIT_USAGE)
+        _bail(
+            "only one of --hourly/--daily/--weekly/--monthly/--interval/--cron may be set",
+            EXIT_USAGE,
+        )
     chosen_interval: Optional[str] = None
-    if   hourly:  chosen_interval = "hourly"
-    elif daily:   chosen_interval = "daily"
-    elif weekly:  chosen_interval = "weekly"
-    elif monthly: chosen_interval = "monthly"
-    elif interval: chosen_interval = interval
+    if hourly:
+        chosen_interval = "hourly"
+    elif daily:
+        chosen_interval = "daily"
+    elif weekly:
+        chosen_interval = "weekly"
+    elif monthly:
+        chosen_interval = "monthly"
+    elif interval:
+        chosen_interval = interval
     if cron and chosen_interval:
         _bail("--cron and an interval flag are mutually exclusive", EXIT_USAGE)
     if not cron and not chosen_interval:
@@ -1032,13 +1214,17 @@ def schedule_add(
     # ----- build the command line -----------------------------------------
     out_path = out.expanduser().resolve()
     eolas_bin = _resolve_eolas_path()
-    command  = _schedule.build_command(eolas_bin, name, str(out_path),
-                                       start=start, end=end, fmt=fmt)
+    command = _schedule.build_command(
+        eolas_bin, name, str(out_path), start=start, end=end, fmt=fmt
+    )
 
     # ----- platform-specific schedule expression --------------------------
     if _schedule.is_windows():
         if cron:
-            _bail("custom --cron expressions aren't supported on Windows; use --interval instead", EXIT_USAGE)
+            _bail(
+                "custom --cron expressions aren't supported on Windows; use --interval instead",
+                EXIT_USAGE,
+            )
         schedule_expr = chosen_interval
     else:
         if cron:
@@ -1053,7 +1239,9 @@ def schedule_add(
     # ----- dry run --------------------------------------------------------
     if dry_run:
         if _schedule.is_windows():
-            typer.echo(f"[dry-run] would create scheduled task {_schedule.TASK_PREFIX}{name}")
+            typer.echo(
+                f"[dry-run] would create scheduled task {_schedule.TASK_PREFIX}{name}"
+            )
             typer.echo(f"          run: {command}")
             typer.echo(f"          schedule: {schedule_expr}")
         else:
@@ -1083,7 +1271,10 @@ def schedule_list(
         _bail(str(e), EXIT_GENERIC)
 
     if _machine_mode(json_out):
-        _emit_ndjson({"name": e.name, "schedule": e.schedule, "command": e.command} for e in entries)
+        _emit_ndjson(
+            {"name": e.name, "schedule": e.schedule, "command": e.command}
+            for e in entries
+        )
         return
 
     if not entries:
@@ -1091,7 +1282,7 @@ def schedule_list(
         return
 
     table = Table(title=f"{len(entries)} schedule{'' if len(entries) == 1 else 's'}")
-    table.add_column("name",     style="cyan", no_wrap=True)
+    table.add_column("name", style="cyan", no_wrap=True)
     table.add_column("schedule", style="magenta", no_wrap=True)
     table.add_column("command")
     for e in entries:
@@ -1117,13 +1308,14 @@ def schedule_remove(name: str) -> None:
 # integrate subcommands — Enterprise plan only, generates connector configs
 # ────────────────────────────────────────────────────────────────────────────
 
+
 def _run_integration(
-    platform:    str,
-    datasets:    str,
-    output:      Path,
-    force:       bool,
-    api_key:     Optional[str],
-    json_out:    bool,
+    platform: str,
+    datasets: str,
+    output: Path,
+    force: bool,
+    api_key: Optional[str],
+    json_out: bool,
 ) -> None:
     """Shared implementation for all `eolas integrate <platform>` commands."""
     ds_list = [d.strip() for d in datasets.split(",") if d.strip()]
@@ -1149,8 +1341,8 @@ def _run_integration(
     out_dir = output.expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    written:    list[Path] = []
-    skipped:    list[Path] = []
+    written: list[Path] = []
+    skipped: list[Path] = []
     for filename, content in files.items():
         target = out_dir / filename
         if target.exists() and not force:
@@ -1161,12 +1353,17 @@ def _run_integration(
         written.append(target)
 
     if _machine_mode(json_out):
-        sys.stdout.write(json.dumps({
-            "platform": platform,
-            "output_dir": str(out_dir),
-            "written":   [str(p) for p in written],
-            "skipped":   [str(p) for p in skipped],
-        }, default=str))
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "platform": platform,
+                    "output_dir": str(out_dir),
+                    "written": [str(p) for p in written],
+                    "skipped": [str(p) for p in skipped],
+                },
+                default=str,
+            )
+        )
         sys.stdout.write("\n")
         return
 
@@ -1191,24 +1388,41 @@ def _default_output_dir(platform: str) -> Path:
 
 @integrate_app.command("meltano")
 def integrate_meltano(
-    datasets: str           = typer.Option(..., "--datasets", "-d", help="Comma-separated dataset names, e.g. 'nz_cpi,nz_gdp'."),
-    output:   Optional[Path]= typer.Option(None, "--output", "-o",   help="Output directory. Default: ./eolas-meltano/"),
-    force:    bool          = typer.Option(False, "--force", "-f",   help="Overwrite existing files in the output directory."),
-    json_out: bool          = typer.Option(False, "--json"),
-    api_key:  Optional[str] = typer.Option(None, "--api-key"),
+    datasets: str = typer.Option(
+        ...,
+        "--datasets",
+        "-d",
+        help="Comma-separated dataset names, e.g. 'nz_cpi,nz_gdp'.",
+    ),
+    output: Optional[Path] = typer.Option(
+        None, "--output", "-o", help="Output directory. Default: ./eolas-meltano/"
+    ),
+    force: bool = typer.Option(
+        False, "--force", "-f", help="Overwrite existing files in the output directory."
+    ),
+    json_out: bool = typer.Option(False, "--json"),
+    api_key: Optional[str] = typer.Option(None, "--api-key"),
 ) -> None:
     """[verified] Generate a Meltano project (uses `tap-rest-api-msdk`) for the chosen datasets."""
-    _run_integration("meltano", datasets, output or _default_output_dir("meltano"),
-                     force, api_key, json_out)
+    _run_integration(
+        "meltano",
+        datasets,
+        output or _default_output_dir("meltano"),
+        force,
+        api_key,
+        json_out,
+    )
 
 
 @integrate_app.command("fivetran")
 def integrate_fivetran(
-    datasets: str           = typer.Option(..., "--datasets", "-d"),
-    output:   Optional[Path]= typer.Option(None, "--output", "-o", help="Default: ./eolas-fivetran/"),
-    force:    bool          = typer.Option(False, "--force", "-f"),
-    json_out: bool          = typer.Option(False, "--json"),
-    api_key:  Optional[str] = typer.Option(None, "--api-key"),
+    datasets: str = typer.Option(..., "--datasets", "-d"),
+    output: Optional[Path] = typer.Option(
+        None, "--output", "-o", help="Default: ./eolas-fivetran/"
+    ),
+    force: bool = typer.Option(False, "--force", "-f"),
+    json_out: bool = typer.Option(False, "--json"),
+    api_key: Optional[str] = typer.Option(None, "--api-key"),
 ) -> None:
     """[experimental] Generate a Fivetran Connector Builder YAML for the chosen datasets.
 
@@ -1217,8 +1431,14 @@ def integrate_fivetran(
     Connector Builder import. If the import rejects with a schema error,
     please share the error so the generator can be fixed.
     """
-    _run_integration("fivetran", datasets, output or _default_output_dir("fivetran"),
-                     force, api_key, json_out)
+    _run_integration(
+        "fivetran",
+        datasets,
+        output or _default_output_dir("fivetran"),
+        force,
+        api_key,
+        json_out,
+    )
     if not _machine_mode(json_out):
         err_console.print(
             "[yellow]experimental:[/yellow] Fivetran output is structure-verified "
@@ -1228,11 +1448,13 @@ def integrate_fivetran(
 
 @integrate_app.command("azure-data-factory")
 def integrate_adf(
-    datasets: str           = typer.Option(..., "--datasets", "-d"),
-    output:   Optional[Path]= typer.Option(None, "--output", "-o", help="Default: ./eolas-adf/"),
-    force:    bool          = typer.Option(False, "--force", "-f"),
-    json_out: bool          = typer.Option(False, "--json"),
-    api_key:  Optional[str] = typer.Option(None, "--api-key"),
+    datasets: str = typer.Option(..., "--datasets", "-d"),
+    output: Optional[Path] = typer.Option(
+        None, "--output", "-o", help="Default: ./eolas-adf/"
+    ),
+    force: bool = typer.Option(False, "--force", "-f"),
+    json_out: bool = typer.Option(False, "--json"),
+    api_key: Optional[str] = typer.Option(None, "--api-key"),
 ) -> None:
     """[experimental] Generate Azure Data Factory linked-service / dataset / pipeline JSON.
 
@@ -1241,9 +1463,14 @@ def integrate_adf(
     datasets) but has not yet been end-to-end tested against a real Azure
     subscription.
     """
-    _run_integration("azure-data-factory", datasets,
-                     output or _default_output_dir("adf"),
-                     force, api_key, json_out)
+    _run_integration(
+        "azure-data-factory",
+        datasets,
+        output or _default_output_dir("adf"),
+        force,
+        api_key,
+        json_out,
+    )
     if not _machine_mode(json_out):
         err_console.print(
             "[yellow]experimental:[/yellow] Azure Data Factory output is "
@@ -1254,6 +1481,7 @@ def integrate_adf(
 # ────────────────────────────────────────────────────────────────────────────
 # library subcommands — manage the persistent data-file directory
 # ────────────────────────────────────────────────────────────────────────────
+
 
 @library_app.command("set")
 def library_set_cmd(
@@ -1310,8 +1538,8 @@ def library_status_cmd() -> None:
     """
     info = library_status()
     source_labels = {
-        "env":      "env EOLAS_LIBRARY",
-        "config":   str(Path.home() / ".eolas" / "config.json"),
+        "env": "env EOLAS_LIBRARY",
+        "config": str(Path.home() / ".eolas" / "config.json"),
         "fallback": "fallback (transient — configure a library for reproducibility)",
     }
     label = source_labels.get(info["source"], info["source"])
@@ -1335,9 +1563,7 @@ def library_clear_cmd() -> None:
         library_clear()
     except Exception as e:
         _bail(f"failed to update config: {e}", EXIT_GENERIC)
-    typer.echo(
-        f"library_dir removed from {Path.home() / '.eolas' / 'config.json'}"
-    )
+    typer.echo(f"library_dir removed from {Path.home() / '.eolas' / 'config.json'}")
 
 
 # Allow `python -m eolas_data.cli`
