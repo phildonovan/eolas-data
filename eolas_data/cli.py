@@ -320,14 +320,18 @@ def datasets_info(
 def datasets_preview(
     name: str,
     limit: int = typer.Option(
-        10, "--limit", "-n", min=1, max=1000, help="Rows to preview."
+        10, "--limit", "-n", min=1, max=10, help="Rows to preview (max 10)."
     ),
     json_out: bool = typer.Option(False, "--json"),
     api_key: Optional[str] = typer.Option(None, "--api-key"),
 ) -> None:
-    """Preview the most recent N rows of a dataset."""
+    """Preview up to 10 sample rows of a dataset.
+
+    Uses the unauthenticated ``/preview`` endpoint: no rate-limit cost and no
+    live-data query. For real data use ``eolas get``.
+    """
     try:
-        df = _client(api_key).get(name, limit=limit)
+        df = _client(api_key).preview(name, limit=limit)
     except EolasError as e:
         _bail(str(e), _exit_for(e))
 
@@ -368,6 +372,11 @@ def get_cmd(
     out: Optional[Path] = typer.Option(
         None, "--out", "-o", help="Write to file. Default: stdout."
     ),
+    dimensions: Optional[str] = typer.Option(
+        None,
+        "--dimensions",
+        help="Case-insensitive substring filter on dimension columns, e.g. 'auckland'.",
+    ),
     api_key: Optional[str] = typer.Option(None, "--api-key"),
 ) -> None:
     """Fetch a dataset and write rows to stdout or a file.
@@ -377,6 +386,7 @@ def get_cmd(
         eolas get nz_cpi --format csv > cpi.csv
         eolas get nz_cpi --start 2020-01-01 --format json | jq '.[].value'
         eolas get sa2_2023 --format parquet --out sa2.parquet
+        eolas get building_consents --dimensions auckland --format csv
     """
     fmt = fmt.lower()
     if fmt not in ("csv", "json", "parquet"):
@@ -388,7 +398,9 @@ def get_cmd(
         )
 
     try:
-        df = _client(api_key).get(name, start=start, end=end, limit=limit)
+        df = _client(api_key).get(
+            name, start=start, end=end, limit=limit, dimensions=dimensions
+        )
     except EolasError as e:
         _bail(str(e), _exit_for(e))
 

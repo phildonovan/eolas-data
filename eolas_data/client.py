@@ -2262,6 +2262,36 @@ class Client:
     # Core data fetch
     # ------------------------------------------------------------------
 
+    def preview(
+        self,
+        name: Union[str, "DatasetName"],
+        *,
+        limit: int = 10,
+    ) -> pd.DataFrame:
+        """Return up to 10 sample rows via the unauthenticated ``/preview`` endpoint.
+
+        A cheap browser-style peek: **no API key required**, it does **not** count
+        against your rate limit, and geometry/WKT columns are hidden server-side
+        (so it stays fast even on large geospatial tables). The server caps the
+        response at 10 rows regardless of ``limit``. For real data use :meth:`get`,
+        :meth:`download`, or :meth:`download_bulk`.
+
+        Args:
+            name: Dataset identifier, e.g. ``"nz_cpi"``.
+            limit: Client-side cap on the returned rows (``<= 10``; the server
+                never returns more than 10).
+
+        Returns:
+            A pandas ``DataFrame`` of the preview rows.
+        """
+        resp = self._raw_get(f"/v1/datasets/{name}/preview")
+        body = resp.json()
+        rows = body.get("rows", []) if isinstance(body, dict) else body
+        df = pd.DataFrame(rows)
+        if limit and len(df) > limit:
+            df = df.head(limit)
+        return df
+
     def get(
         self,
         name: Union[str, "DatasetName"],
@@ -2276,6 +2306,7 @@ class Client:
         envelope: bool = False,
         force: bool = False,
         progress: ProgressControl = None,
+        dimensions: Optional[str] = None,
     ) -> Dataset:
         """Fetch dataset rows as a pandas (or polars / geopandas) DataFrame.
 
@@ -2321,6 +2352,10 @@ class Client:
             progress: Control bulk download/read progress when auto-routed to
                     :meth:`get_local`. ``None`` auto-detects TTY; ignored on the
                     live API path.
+            dimensions: Case-insensitive substring filter on the dataset's
+                    dimension columns (e.g. ``"auckland"``). Applied server-side
+                    on the live ``/data`` path; passing it forces the live path
+                    (the bulk cache has no per-request dimension filter).
 
         Returns:
             A :class:`Dataset` (pandas DataFrame subclass), a polars DataFrame
@@ -2379,6 +2414,7 @@ class Client:
             and format == "json"
             and not envelope
             and not as_arrow
+            and not dimensions  # bulk cache has no per-request dimension filter
         ):
             # Narrow the swallow to the ROUTING DECISION only (metadata lookup +
             # predicates). A failure there legitimately falls through to the live
@@ -2427,6 +2463,8 @@ class Client:
             params["start"] = start
         if end:
             params["end"] = end
+        if dimensions:
+            params["dimensions"] = dimensions
 
         fetch_limit, user_limit = resolve_fetch_limit(limit)
         # Positive limits on large/geo datasets must be sent to the API — the
