@@ -49,6 +49,23 @@ jobs:
           pip install "$WHL"
           pip install pytest responses geopandas shapely pandas pyarrow typer rich keyring
 
+      - name: Version self-report parity (REL-1)
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          expected="${TAG#v}"
+          # __version__ is read from installed distribution metadata, so this
+          # asserts the wheel the user pip-installs self-reports the tag — the
+          # exact drift (shipped 1.3.21 said 1.3.20) that this gate structurally
+          # closes. Run from /tmp so the source tree's __init__ can't shadow.
+          reported=$(cd /tmp && python -c "import eolas_data; print(eolas_data.__version__)")
+          echo "Tag: $expected | __version__: $reported"
+          if [ "$reported" != "$expected" ]; then
+            echo "::error::Installed eolas_data.__version__ ($reported) != tag ($expected)"
+            exit 1
+          fi
+
       - name: Client contract matrix
         run: python scripts/check_client_contract.py
 

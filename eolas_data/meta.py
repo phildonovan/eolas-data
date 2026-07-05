@@ -1,4 +1,5 @@
 """Dataset metadata attachment — table + column glosses from /v1/datasets/{name}."""
+
 from __future__ import annotations
 
 from typing import Any, Optional
@@ -18,7 +19,9 @@ _PROVENANCE_HEADERS = {
 def provenance_from_headers(headers) -> dict:
     """Extract response provenance from X-Eolas-* headers on /data responses."""
     out: dict[str, str] = {}
-    get = headers.get if hasattr(headers, "get") else lambda k, d=None: headers.get(k, d)
+    get = (
+        headers.get if hasattr(headers, "get") else lambda k, d=None: headers.get(k, d)
+    )
     for hdr, key in _PROVENANCE_HEADERS.items():
         val = get(hdr)
         if val:
@@ -148,7 +151,11 @@ def attach_meta(
     }
     for key, val in object_payload.items():
         try:
-            setattr(df, key, val)
+            # object.__setattr__ bypasses pandas' NDFrame.__setattr__, which on
+            # pandas 3 emits a UserWarning for every non-column attribute set
+            # (fired on every get() — PY-3). The accessor (df.eolas_name) still
+            # works; the value lives in df.__dict__ exactly as before.
+            object.__setattr__(df, key, val)
         except (AttributeError, TypeError):
             pass
     return df
@@ -196,12 +203,12 @@ def date_filter_column_from_info(info: dict) -> Optional[str]:
     if not raw_cols:
         return None
     if isinstance(raw_cols, pd.DataFrame):
-        names = set(raw_cols["name"].astype(str)) if "name" in raw_cols.columns else set()
+        names = (
+            set(raw_cols["name"].astype(str)) if "name" in raw_cols.columns else set()
+        )
     else:
         names = {
-            str(c["name"])
-            for c in raw_cols
-            if isinstance(c, dict) and c.get("name")
+            str(c["name"]) for c in raw_cols if isinstance(c, dict) and c.get("name")
         }
     return next((c for c in DATE_FILTER_CANDIDATES if c in names), None)
 
