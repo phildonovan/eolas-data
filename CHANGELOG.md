@@ -3,6 +3,19 @@
 All notable changes to `eolas-data` are recorded here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## 1.4.0
+
+### Added
+
+- **`Client.preview(name)`** — up to 10 sample rows via the unauthenticated
+  `/preview` endpoint. No API key required, no rate-limit cost, geometry hidden.
+  `eolas datasets preview` now uses it instead of burning an authenticated,
+  rate-limited `/data` call (DRIFT-5).
+- **`dimensions=` filter on `get()`** and `eolas get --dimensions` — a
+  case-insensitive substring filter on dimension columns, applied server-side on
+  the live `/data` path (the filter was live in prod but exposed by no client;
+  DRIFT-4).
+
 ## 1.3.22
 
 Network-hardening + correctness release, addressing findings from the
