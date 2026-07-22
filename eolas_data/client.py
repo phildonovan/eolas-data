@@ -424,6 +424,36 @@ class Client:
         return (meta.get("bulk_export_class") or "").lower() not in ("", "none")
 
     @classmethod
+    def _drop_geometry_column(cls, df):
+        """Remove geometry from a bulk-read frame for get(geometry=False).
+
+        Handles both shapes the bulk path can return: a plain frame carrying the
+        raw ``geometry_wkt`` string column, and a GeoDataFrame whose active
+        geometry column may be named something else (``.geometry.name``).
+        Preserves the frame's class where possible so Dataset metadata survives.
+        """
+        cols = [c for c in ("geometry_wkt",) if c in getattr(df, "columns", [])]
+        active = getattr(getattr(df, "geometry", None), "name", None)
+        if active and active in getattr(df, "columns", []):
+            cols.append(active)
+        if not cols:
+            return df
+        out = df.drop(columns=cols)
+        # A GeoDataFrame without its geometry column is no longer meaningfully
+        # geo; fall back to a plain frame so downstream .geometry access fails
+        # loudly rather than returning a stale reference.
+        try:
+            import geopandas as gpd
+
+            if isinstance(out, gpd.GeoDataFrame):
+                import pandas as pd
+
+                out = pd.DataFrame(out)
+        except ImportError:
+            pass
+        return out
+
+    @classmethod
     def _live_pull_blocked(cls, meta: dict, geometry: bool = True) -> bool:
         """True when limit=0 with no date bounds would hit the API 413 guard.
 
@@ -2456,14 +2486,23 @@ class Client:
             except Exception:
                 should_route = False  # metadata/routing failed → live path
             if should_route:
+                # The bulk artifact always carries geometry_wkt — there is no
+                # server-side projection on that path. If the caller asked for
+                # geometry=False we must honour it here, or a >100k-row spatial
+                # table (still blocked by the row-count trigger, so still routed)
+                # silently returns the full geometry-bearing file, and with
+                # as_geo=None even auto-converts to a GeoDataFrame — the exact
+                # opposite of what was requested. Found in review, 2026-07-22.
                 result = self.get_local(
                     name,
-                    as_geo=as_geo,
+                    as_geo=False if not geometry else as_geo,
                     as_arrow=False,
                     meta=meta,
                     force=force,
                     progress=progress,
                 )
+                if not geometry:
+                    result = self._drop_geometry_column(result)
                 if engine == "polars":
                     try:
                         import polars as pl

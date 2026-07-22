@@ -183,3 +183,53 @@ class TestLivePullBlocked:
 
     def test_default_argument_preserves_old_behaviour(self):
         assert Client._live_pull_blocked(GEO_INFO) is True
+
+
+# ---- bulk-route path (Grok review, 2026-07-22) ------------------------------
+# A spatial table that is ALSO over the row-count threshold stays "blocked" even
+# with geometry=False, so get() routes it to the bulk cache. The geometry flag
+# must survive that hand-off, otherwise the caller silently receives the full
+# geometry-bearing file -- and with as_geo defaulting to None, an auto-converted
+# GeoDataFrame -- which is the exact opposite of what they asked for.
+
+BIG_GEO_INFO = {**GEO_INFO, "name": "nz_parcels", "row_count_at_last_refresh": 2_000_000}
+
+
+@resp_lib.activate
+def test_bulk_route_honours_geometry_false(client, monkeypatch):
+    import pandas as pd
+
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_parcels", json=BIG_GEO_INFO)
+    seen = {}
+
+    def fake_get_local(name, **kwargs):
+        seen.update(kwargs)
+        # The bulk file always carries geometry; the client must strip it.
+        return pd.DataFrame(
+            [{"parcel_id": 1, "geometry_wkt": "POINT(174 -36)"}]
+        )
+
+    monkeypatch.setattr(client, "get_local", fake_get_local)
+    out = client.get("nz_parcels", geometry=False)
+
+    assert "geometry_wkt" not in out.columns, (
+        "bulk-routed get(geometry=False) returned the geometry column"
+    )
+    # Must not silently hand back a GeoDataFrame either.
+    assert seen.get("as_geo") is False, (
+        "bulk route should force as_geo=False when geometry=False"
+    )
+
+
+@resp_lib.activate
+def test_bulk_route_keeps_geometry_by_default(client, monkeypatch):
+    import pandas as pd
+
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_parcels", json=BIG_GEO_INFO)
+
+    def fake_get_local(name, **kwargs):
+        return pd.DataFrame([{"parcel_id": 1, "geometry_wkt": "POINT(174 -36)"}])
+
+    monkeypatch.setattr(client, "get_local", fake_get_local)
+    out = client.get("nz_parcels")
+    assert "geometry_wkt" in out.columns

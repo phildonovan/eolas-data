@@ -23,6 +23,12 @@ All notable changes to `eolas-data` are recorded here. This project follows
 
 ### Fixed
 
+- **`geometry=False` is now honoured on the bulk-routed path.** A spatial table
+  over the 100k-row threshold stays "blocked" even with `geometry=False`, so
+  `get()` routes it to the bulk cache — which has no server-side projection. The
+  flag was dropped at that hand-off, so the caller silently received the full
+  geometry-bearing file and, with `as_geo=None`, an auto-converted GeoDataFrame.
+  Found in peer review.
 - **The in-memory response cache now keys on `geometry`.** Without it,
   `get(x)` and `get(x, geometry=False)` shared a cache key, so whichever ran
   second silently returned the other's shape (a whole column different). Only
