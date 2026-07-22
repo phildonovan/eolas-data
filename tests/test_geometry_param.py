@@ -297,3 +297,91 @@ def test_get_local_geometry_false_does_not_return_geodataframe(
     )
     assert type(out).__name__ != "GeoDataFrame"
     assert not hasattr(out, "crs")
+
+
+# ---- format branches ---------------------------------------------------------
+# These paths existed but had never been executed by any test: the csv_gz reader
+# (which is also the OSError fallback when a Parquet read fails), the as_arrow
+# reader, and GeoParquet's WKB `geometry` column — a DIFFERENT name from the
+# `geometry_wkt` convention, excluded only because _GEOMETRY_COLUMNS lists both.
+
+
+def _client_reading(monkeypatch, path):
+    c = Client("eolas_testkey123", base_url=BASE)
+    monkeypatch.setattr(c, "sync_bulk", lambda *a, **k: path)
+    return c
+
+
+def test_csv_gz_read_honours_geometry_false(tmp_path, monkeypatch):
+    import pandas as pd
+
+    p = tmp_path / "x.csv.gz"
+    pd.DataFrame(
+        {"a": [1, 2], "b": ["x", "y"], "geometry_wkt": ["POINT(1 1)", "POINT(2 2)"]}
+    ).to_csv(p, index=False, compression="gzip")
+    c = _client_reading(monkeypatch, p)
+    out = c.get_local(
+        "x", cache_dir=tmp_path, format="csv_gz", meta=False, geometry=False
+    )
+    assert list(out.columns) == ["a", "b"]
+    assert len(out) == 2
+
+
+def test_csv_gz_read_keeps_geometry_by_default(tmp_path, monkeypatch):
+    import pandas as pd
+
+    p = tmp_path / "x.csv.gz"
+    pd.DataFrame({"a": [1], "geometry_wkt": ["POINT(1 1)"]}).to_csv(
+        p, index=False, compression="gzip"
+    )
+    c = _client_reading(monkeypatch, p)
+    out = c.get_local(
+        "x", cache_dir=tmp_path, format="csv_gz", meta=False, as_geo=False
+    )
+    assert "geometry_wkt" in out.columns
+
+
+def test_as_arrow_honours_geometry_false(tmp_path, monkeypatch):
+    import pandas as pd
+
+    p = tmp_path / "y.parquet"
+    pd.DataFrame({"a": [1, 2], "geometry_wkt": ["P1", "P2"]}).to_parquet(p, index=False)
+    c = _client_reading(monkeypatch, p)
+    tbl = c.get_local(
+        "y",
+        cache_dir=tmp_path,
+        format="parquet",
+        meta=False,
+        geometry=False,
+        as_arrow=True,
+    )
+    assert tbl.column_names == ["a"]
+
+
+def test_as_arrow_keeps_geometry_by_default(tmp_path, monkeypatch):
+    import pandas as pd
+
+    p = tmp_path / "y.parquet"
+    pd.DataFrame({"a": [1], "geometry_wkt": ["P1"]}).to_parquet(p, index=False)
+    c = _client_reading(monkeypatch, p)
+    tbl = c.get_local(
+        "y", cache_dir=tmp_path, format="parquet", meta=False, as_arrow=True
+    )
+    assert "geometry_wkt" in tbl.column_names
+
+
+def test_geoparquet_wkb_geometry_column_is_excluded(tmp_path, monkeypatch):
+    """GeoParquet's geometry column is named `geometry`, not `geometry_wkt`."""
+    gpd = pytest.importorskip("geopandas")
+    import shapely.geometry as sg
+
+    p = tmp_path / "z.geo.parquet"
+    gpd.GeoDataFrame(
+        {"a": [1, 2]}, geometry=[sg.Point(1, 1), sg.Point(2, 2)], crs="EPSG:4326"
+    ).to_parquet(p, index=False)
+    c = _client_reading(monkeypatch, p)
+    out = c.get_local(
+        "z", cache_dir=tmp_path, format="geoparquet", meta=False, geometry=False
+    )
+    assert list(out.columns) == ["a"]
+    assert type(out).__name__ != "GeoDataFrame"
