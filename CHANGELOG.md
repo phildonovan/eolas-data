@@ -3,7 +3,13 @@
 All notable changes to `eolas-data` are recorded here. This project follows
 [Semantic Versioning](https://semver.org/).
 
-## 1.5.0
+## 1.9.0
+
+> Version jumps 1.4.0 -> 1.9.0. PyPI versions 1.5.0-1.8.0 were uploaded in May
+> 2026 and later yanked; yanked filenames are permanently reserved, so those
+> numbers can never be published again. The 1.9.0 jump clears the band for good.
+> The R client moves to 1.9.0 at the same time so the two stay aligned.
+
 
 ### Added
 
