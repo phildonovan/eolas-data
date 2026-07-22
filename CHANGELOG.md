@@ -3,6 +3,31 @@
 All notable changes to `eolas-data` are recorded here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## 1.9.1
+
+### Changed
+
+- **`geometry=False` now skips the column at READ time, not after.** 1.9.0 read
+  the whole Parquet — WKT included — and dropped the column afterwards, paying
+  the full parse and peak memory for data discarded a line later. `get_local()`
+  now passes `columns=` to `pd.read_parquet()`, so those column chunks are never
+  decoded, and it deliberately avoids `gpd.read_parquet()` (which would
+  materialise shapely geometry we are about to throw away). `get()` passes the
+  flag down rather than applying it to the result.
+
+  Geometry is typically ~95% of a spatial layer's bytes: `geometry_wkt` is 262 of
+  275 MB in `linz.nz_building_outlines`.
+
+- `get_local()` gains a `geometry` argument, mirroring `get()`.
+
+### Unchanged (deliberately)
+
+- What gets downloaded. One cached artifact still serves both variants, so
+  upgrading a non-spatial read back to spatial re-reads the same local file with
+  no re-download. A test asserts the cache file is byte-identical after a
+  `geometry=False` read. Reducing the *download* is a separate design question —
+  see `docs/geometry-fetch-design-2026-07-22.md` in the eolas repo.
+
 ## 1.9.0
 
 > Version jumps 1.4.0 -> 1.9.0. PyPI versions 1.5.0-1.8.0 were uploaded in May
