@@ -28,6 +28,29 @@ jobs:
             echo "::warning::R package version ($r_ver) differs from tag ($expected) — align releases when possible"
           fi
 
+      - name: Guard — version must not already exist on PyPI
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          # PyPI permanently reserves a filename once uploaded, INCLUDING for
+          # yanked releases — a yanked version can never be re-published. This
+          # repo has a burned band at 1.5.0-1.8.0 (uploaded May 2026, yanked),
+          # and development later resumed BELOW it on the 1.3.x line, so a naive
+          # minor bump can walk straight back into it. Without this guard that
+          # failure surfaces only at the upload step, after a full build+test,
+          # as an opaque "400 File already exists".
+          set -euo pipefail
+          expected="${TAG#v}"
+          taken=$(curl -fsSL "https://pypi.org/pypi/eolas-data/json" \
+            | python3 -c "import json,sys; print('yes' if '$expected' in json.load(sys.stdin)['releases'] else 'no')")
+          if [ "$taken" = "yes" ]; then
+            echo "::error::Version $expected already exists on PyPI (possibly yanked)."
+            echo "::error::Yanked versions permanently reserve their filenames and cannot be re-published."
+            echo "::error::Pick a version above every existing release and re-tag."
+            exit 1
+          fi
+          echo "Version $expected is free on PyPI."
+
   test:
     runs-on: ubuntu-latest
     needs: version-parity
