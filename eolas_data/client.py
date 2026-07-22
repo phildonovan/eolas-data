@@ -75,6 +75,11 @@ class _TimeoutSession(requests.Session):
             raise EolasError(f"Network error talking to api.eolas.fyi: {exc}") from exc
 
 
+# Geometry columns excluded when a caller passes geometry=False. `geometry_wkt`
+# is the eolas convention (data-conventions.md §3, always that name); `geometry`
+# is what GeoParquet bulk artifacts carry as their WKB column.
+_GEOMETRY_COLUMNS = frozenset({"geometry_wkt", "geometry"})
+
 _SIDECAR_SCHEMA_VERSION = 1
 _SIDECAR_SCHEMA_VERSION_CDC = 2
 
@@ -2112,6 +2117,7 @@ class Client:
         meta: bool = True,
         progress: ProgressControl = None,
         force: bool = False,
+        geometry: bool = True,
     ) -> "pd.DataFrame":
         """Download (or serve from cache) a whole dataset as a local DataFrame.
 
@@ -2179,7 +2185,13 @@ class Client:
                 "Choose one."
             )
         # Resolve as_geo: None → True (auto) unless as_arrow overrides.
-        resolved_as_geo = as_geo if as_geo is not None else (not as_arrow)
+        # geometry=False forces it off — there will be no geometry column to
+        # convert, and auto-converting would be the opposite of what was asked.
+        resolved_as_geo = (
+            False
+            if not geometry
+            else (as_geo if as_geo is not None else (not as_arrow))
+        )
         self._apply_force(name, force)
 
         # ---- resolve cache_dir -----------------------------------------------
@@ -2250,13 +2262,46 @@ class Client:
                     import pyarrow as _pa
 
                     return _pa.Table.from_pandas(
-                        pd.read_csv(file_path),
+                        pd.read_csv(
+                            file_path,
+                            usecols=(
+                                (lambda c: c not in _GEOMETRY_COLUMNS)
+                                if not geometry
+                                else None
+                            ),
+                        ),
                         preserve_index=False,
+                    )
+                if not geometry:
+                    names = _pq.ParquetFile(file_path).schema_arrow.names
+                    return _pq.read_table(
+                        file_path,
+                        columns=[c for c in names if c not in _GEOMETRY_COLUMNS],
                     )
                 return _pq.read_table(file_path)
 
         def _read_bulk_file(path: pathlib.Path, bulk_fmt: str):
             with self._with_read_progress(read_label, show_read):
+                # geometry=False: project the geometry column away AT READ TIME.
+                # The cached artifact is unchanged (one file serves both variants
+                # — no cache duplication), but Parquet is columnar, so an
+                # unselected column is never decoded and its pages are never even
+                # read off disk. Dropping the column after a full read would pay
+                # the whole WKB/WKT parse and peak memory for data we discard,
+                # which on a large boundary layer is most of the cost.
+                if not geometry:
+                    if bulk_fmt == "csv_gz":
+                        return pd.read_csv(
+                            path, usecols=lambda c: c not in _GEOMETRY_COLUMNS
+                        )
+                    import pyarrow.parquet as _pq
+
+                    names = _pq.ParquetFile(path).schema_arrow.names
+                    keep = [c for c in names if c not in _GEOMETRY_COLUMNS]
+                    # Deliberately pandas, not geopandas, even for geoparquet:
+                    # gpd.read_parquet would materialise shapely geometry we are
+                    # about to discard.
+                    return pd.read_parquet(path, columns=keep)
                 if bulk_fmt == "csv_gz":
                     return pd.read_csv(path)
                 if bulk_fmt == "geoparquet" and resolved_as_geo:
@@ -2486,23 +2531,22 @@ class Client:
             except Exception:
                 should_route = False  # metadata/routing failed → live path
             if should_route:
-                # The bulk artifact always carries geometry_wkt — there is no
-                # server-side projection on that path. If the caller asked for
-                # geometry=False we must honour it here, or a >100k-row spatial
-                # table (still blocked by the row-count trigger, so still routed)
-                # silently returns the full geometry-bearing file, and with
-                # as_geo=None even auto-converts to a GeoDataFrame — the exact
-                # opposite of what was requested. Found in review, 2026-07-22.
+                # The bulk artifact always carries geometry — there is no
+                # server-side projection on this path — so geometry=False must be
+                # honoured locally. It is passed DOWN to get_local() rather than
+                # applied after: get_local projects the column away at read time,
+                # so the WKB/WKT is never decoded (see _read_bulk_file). The
+                # cached file itself is untouched, so one artifact still serves
+                # both variants.
                 result = self.get_local(
                     name,
-                    as_geo=False if not geometry else as_geo,
+                    as_geo=as_geo,
                     as_arrow=False,
                     meta=meta,
                     force=force,
                     progress=progress,
+                    geometry=geometry,
                 )
-                if not geometry:
-                    result = self._drop_geometry_column(result)
                 if engine == "polars":
                     try:
                         import polars as pl

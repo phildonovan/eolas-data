@@ -185,18 +185,18 @@ class TestLivePullBlocked:
         assert Client._live_pull_blocked(GEO_INFO) is True
 
 
-# ---- bulk-route path (Grok review, 2026-07-22) ------------------------------
-# A spatial table that is ALSO over the row-count threshold stays "blocked" even
-# with geometry=False, so get() routes it to the bulk cache. The geometry flag
-# must survive that hand-off, otherwise the caller silently receives the full
-# geometry-bearing file -- and with as_geo defaulting to None, an auto-converted
-# GeoDataFrame -- which is the exact opposite of what they asked for.
+# ---- bulk-route path --------------------------------------------------------
+# A spatial table ALSO over the row-count threshold stays "blocked" even with
+# geometry=False, so get() routes it to the bulk cache — which has no
+# server-side projection. Two separate responsibilities, tested separately:
+#   get()       must pass the flag DOWN to get_local()
+#   get_local() must project the column away AT READ TIME (never decode it)
 
 BIG_GEO_INFO = {**GEO_INFO, "name": "nz_parcels", "row_count_at_last_refresh": 2_000_000}
 
 
 @resp_lib.activate
-def test_bulk_route_honours_geometry_false(client, monkeypatch):
+def test_get_delegates_geometry_to_get_local(client, monkeypatch):
     import pandas as pd
 
     resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_parcels", json=BIG_GEO_INFO)
@@ -204,32 +204,96 @@ def test_bulk_route_honours_geometry_false(client, monkeypatch):
 
     def fake_get_local(name, **kwargs):
         seen.update(kwargs)
-        # The bulk file always carries geometry; the client must strip it.
-        return pd.DataFrame(
-            [{"parcel_id": 1, "geometry_wkt": "POINT(174 -36)"}]
-        )
+        return pd.DataFrame([{"parcel_id": 1}])
 
     monkeypatch.setattr(client, "get_local", fake_get_local)
-    out = client.get("nz_parcels", geometry=False)
-
-    assert "geometry_wkt" not in out.columns, (
-        "bulk-routed get(geometry=False) returned the geometry column"
-    )
-    # Must not silently hand back a GeoDataFrame either.
-    assert seen.get("as_geo") is False, (
-        "bulk route should force as_geo=False when geometry=False"
+    client.get("nz_parcels", geometry=False)
+    assert seen.get("geometry") is False, (
+        "get() must pass geometry down so get_local can skip the column at read "
+        "time; dropping it afterwards would decode the WKT for nothing"
     )
 
 
 @resp_lib.activate
-def test_bulk_route_keeps_geometry_by_default(client, monkeypatch):
+def test_get_delegates_geometry_true_by_default(client, monkeypatch):
     import pandas as pd
 
     resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_parcels", json=BIG_GEO_INFO)
+    seen = {}
+    monkeypatch.setattr(
+        client,
+        "get_local",
+        lambda name, **kw: (seen.update(kw), pd.DataFrame([{"parcel_id": 1}]))[1],
+    )
+    client.get("nz_parcels")
+    assert seen.get("geometry") is True
 
-    def fake_get_local(name, **kwargs):
-        return pd.DataFrame([{"parcel_id": 1, "geometry_wkt": "POINT(174 -36)"}])
 
-    monkeypatch.setattr(client, "get_local", fake_get_local)
-    out = client.get("nz_parcels")
+def _write_geo_parquet(path):
+    import pandas as pd
+
+    pd.DataFrame(
+        {
+            "parcel_id": [1, 2],
+            "area_m2": [100.0, 250.0],
+            "geometry_wkt": ["POINT(174 -36)", "POINT(175 -37)"],
+        }
+    ).to_parquet(path, index=False)
+
+
+def test_get_local_projects_geometry_at_read(tmp_path, monkeypatch, client):
+    """The cached artifact keeps its geometry; the READ skips the column.
+
+    Asserts the file on disk is untouched — one artifact serves both variants, so
+    asking for geometry=False must not fragment or rewrite the cache.
+    """
+    cache = tmp_path / "lib"
+    cache.mkdir()
+    target = cache / "nz_parcels.parquet"
+    _write_geo_parquet(target)
+    before = target.read_bytes()
+
+    monkeypatch.setattr(client, "sync_bulk", lambda *a, **k: target)
+
+    out = client.get_local(
+        "nz_parcels", cache_dir=cache, format="parquet", meta=False, geometry=False
+    )
+    assert "geometry_wkt" not in out.columns
+    assert list(out.columns) == ["parcel_id", "area_m2"]
+    assert len(out) == 2, "row count must be unaffected"
+
+    # The cache file itself still carries geometry — untouched on disk.
+    assert target.read_bytes() == before
+    import pyarrow.parquet as pq
+
+    assert "geometry_wkt" in pq.ParquetFile(target).schema_arrow.names
+
+
+def test_get_local_keeps_geometry_by_default(tmp_path, monkeypatch, client):
+    cache = tmp_path / "lib"
+    cache.mkdir()
+    target = cache / "nz_parcels.parquet"
+    _write_geo_parquet(target)
+    monkeypatch.setattr(client, "sync_bulk", lambda *a, **k: target)
+
+    out = client.get_local(
+        "nz_parcels", cache_dir=cache, format="parquet", meta=False, as_geo=False
+    )
     assert "geometry_wkt" in out.columns
+
+
+def test_get_local_geometry_false_does_not_return_geodataframe(
+    tmp_path, monkeypatch, client
+):
+    """as_geo defaults to auto-convert; geometry=False must override that."""
+    cache = tmp_path / "lib"
+    cache.mkdir()
+    target = cache / "nz_parcels.parquet"
+    _write_geo_parquet(target)
+    monkeypatch.setattr(client, "sync_bulk", lambda *a, **k: target)
+
+    out = client.get_local(
+        "nz_parcels", cache_dir=cache, format="parquet", meta=False, geometry=False
+    )
+    assert type(out).__name__ != "GeoDataFrame"
+    assert not hasattr(out, "crs")

@@ -26,7 +26,7 @@ from .exceptions import (
 try:
     __version__ = _pkg_version("eolas-data")
 except PackageNotFoundError:  # pragma: no cover - uninstalled source checkout
-    __version__ = "1.9.0"
+    __version__ = "1.9.1"
 
 __all__ = [
     "Client",
