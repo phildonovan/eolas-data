@@ -3,6 +3,37 @@
 All notable changes to `eolas-data` are recorded here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## 1.5.0
+
+### Added
+
+- **`geometry=False` on `get()`** — omit the `geometry_wkt` column. Two-thirds of
+  eolas datasets (1017/1536) carry geometry, and on TA/RC boundary tables the WKT
+  dwarfs the attributes. The column is projected away at the API's storage layer,
+  so it is never read from S3 or transferred — this cuts I/O, not just payload.
+  Responses carry `X-Eolas-Geometry-Omitted: true`.
+
+### Changed
+
+- **Whole-dataset pulls of small spatial tables stay on the live path when
+  `geometry=False`.** Geometry was one of the two triggers for the API's
+  large-dataset (413) guard, so `get("some_boundary_table")` was transparently
+  diverted to a bulk download. The client now mirrors the server's relaxed guard.
+  The row-count trigger is unchanged — dropping a column doesn't reduce row count.
+
+### Fixed
+
+- **`geometry=False` is now honoured on the bulk-routed path.** A spatial table
+  over the 100k-row threshold stays "blocked" even with `geometry=False`, so
+  `get()` routes it to the bulk cache — which has no server-side projection. The
+  flag was dropped at that hand-off, so the caller silently received the full
+  geometry-bearing file and, with `as_geo=None`, an auto-converted GeoDataFrame.
+  Found in peer review.
+- **The in-memory response cache now keys on `geometry`.** Without it,
+  `get(x)` and `get(x, geometry=False)` shared a cache key, so whichever ran
+  second silently returned the other's shape (a whole column different). Only
+  reachable with `Client(cache=True)`.
+
 ## 1.4.0
 
 ### Added
