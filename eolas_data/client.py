@@ -424,13 +424,19 @@ class Client:
         return (meta.get("bulk_export_class") or "").lower() not in ("", "none")
 
     @classmethod
-    def _live_pull_blocked(cls, meta: dict) -> bool:
-        """True when limit=0 with no date bounds would hit the API 413 guard."""
+    def _live_pull_blocked(cls, meta: dict, geometry: bool = True) -> bool:
+        """True when limit=0 with no date bounds would hit the API 413 guard.
+
+        ``geometry=False`` means the caller asked the API to project
+        ``geometry_wkt`` away at the scan, which is exactly the condition the
+        server drops from its own guard — so skip the geometry trigger here too.
+        Leaving it in would keep routing attributes-only pulls to a bulk
+        download, defeating the point. The row-count trigger still applies:
+        dropping a column doesn't reduce the number of rows.
+        """
         row_count = int(meta.get("row_count_at_last_refresh") or 0)
-        return (
-            bool(meta.get("has_geometry"))
-            or row_count > cls._LARGE_DATASET_ROW_THRESHOLD
-        )
+        geo_blocks = bool(meta.get("has_geometry")) and geometry
+        return geo_blocks or row_count > cls._LARGE_DATASET_ROW_THRESHOLD
 
     @staticmethod
     def _require_bulk_export(meta: dict, name: Union[str, "DatasetName"]) -> None:
@@ -2307,6 +2313,7 @@ class Client:
         force: bool = False,
         progress: ProgressControl = None,
         dimensions: Optional[str] = None,
+        geometry: bool = True,
     ) -> Dataset:
         """Fetch dataset rows as a pandas (or polars / geopandas) DataFrame.
 
@@ -2356,6 +2363,17 @@ class Client:
                     dimension columns (e.g. ``"auckland"``). Applied server-side
                     on the live ``/data`` path; passing it forces the live path
                     (the bulk cache has no per-request dimension filter).
+            geometry: When ``False``, ask the API to omit the ``geometry_wkt``
+                    column. It is projected away at the storage layer, so it is
+                    never read or transferred — much faster and smaller on TA/RC
+                    boundary tables where you only want the attributes (the WKT
+                    usually dwarfs the rest of the row). Also lifts the
+                    whole-dataset restriction on spatial tables, since geometry
+                    is one of the two 413 triggers, so
+                    ``get(name, geometry=False)`` can return a small boundary
+                    table in full. Cannot be combined with ``as_geo=True``
+                    (raises ``ValueError``) — there would be no geometry to
+                    convert.
 
         Returns:
             A :class:`Dataset` (pandas DataFrame subclass), a polars DataFrame
@@ -2377,6 +2395,12 @@ class Client:
                 "as_arrow returns a pyarrow.Table (no geometry materialisation); "
                 "as_geo materialises geometry as shapely objects in a GeoDataFrame. "
                 "Choose one."
+            )
+        if not geometry and as_geo:
+            raise ValueError(
+                "geometry=False and as_geo=True are contradictory. "
+                "geometry=False asks the API to omit the geometry_wkt column, "
+                "leaving nothing for as_geo to convert. Choose one."
             )
         if envelope and (format != "json" or as_arrow):
             raise ValueError("envelope=True requires format='json' and as_arrow=False.")
@@ -2428,7 +2452,7 @@ class Client:
                 info_meta = self._info_cached(name)
                 should_route = self._bulk_export_allowed(
                     info_meta
-                ) and self._live_pull_blocked(info_meta)
+                ) and self._live_pull_blocked(info_meta, geometry=geometry)
             except Exception:
                 should_route = False  # metadata/routing failed → live path
             if should_route:
@@ -2453,7 +2477,10 @@ class Client:
                 return result
 
         # ---- early in-memory cache check -------------------------------------
-        _early_cache_key = f"{name}:{start}:{end}:{format}:{0 if limit is None else int(limit)}:{as_geo}"
+        # `geometry` MUST be part of the key: the two variants differ by a whole
+        # column, so without it get(x) and get(x, geometry=False) collide and one
+        # silently returns the other's shape.
+        _early_cache_key = f"{name}:{start}:{end}:{format}:{0 if limit is None else int(limit)}:{as_geo}:{geometry}"
         if self._cache is not None and _early_cache_key in self._cache:
             return self._cache[_early_cache_key]
 
@@ -2465,6 +2492,11 @@ class Client:
             params["end"] = end
         if dimensions:
             params["dimensions"] = dimensions
+        # Only send the parameter when narrowing: geometry=true is the server
+        # default, so omitting it keeps URLs (and CDN cache keys) stable for the
+        # overwhelming majority of calls.
+        if not geometry:
+            params["geometry"] = "false"
 
         fetch_limit, user_limit = resolve_fetch_limit(limit)
         # Positive limits on large/geo datasets must be sent to the API — the
@@ -2473,13 +2505,13 @@ class Client:
         if user_limit and int(user_limit) > 0 and start is None and end is None:
             try:
                 info_meta = self._info_cached(name)
-                if self._live_pull_blocked(info_meta):
+                if self._live_pull_blocked(info_meta, geometry=geometry):
                     fetch_limit = int(user_limit)
             except Exception:
                 pass
         params["limit"] = fetch_limit
 
-        cache_key = f"{name}:{start}:{end}:{format}:{0 if limit is None else int(limit)}:{as_geo}"
+        cache_key = f"{name}:{start}:{end}:{format}:{0 if limit is None else int(limit)}:{as_geo}:{geometry}"
         if self._cache is not None and cache_key in self._cache:
             return self._cache[cache_key]
 
