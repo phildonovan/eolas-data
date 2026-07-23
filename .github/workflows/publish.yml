@@ -69,7 +69,13 @@ jobs:
       - name: Install wheel + test deps
         run: |
           WHL=$(ls -1 dist/*.whl | head -1)
-          pip install "$WHL"
+          # Install the wheel WITH its [mcp] extra, so this gate actually
+          # resolves and imports the optional surface it ships. Installing the
+          # bare wheel let the mcp test files fail to collect (No module named
+          # 'mcp') on the 1.10.0 tag — and, more importantly, would have let the
+          # [mcp] extra ship broken (declared entry point, missing module) on
+          # every release from 1.3.22 to 1.9.1 without this gate noticing.
+          pip install "$WHL[mcp]"
           pip install pytest responses geopandas shapely pandas pyarrow typer rich keyring
 
       - name: Version self-report parity (REL-1)
