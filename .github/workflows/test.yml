@@ -32,8 +32,8 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install package + dev + geo + secure (editable)
-        run: pip install -e ".[dev,geo,secure]"
+      - name: Install package + dev + geo + secure + mcp (editable)
+        run: pip install -e ".[dev,geo,secure,mcp]"
 
       - name: pytest (unit suite)
         run: pytest -q -m "not integration"
@@ -57,7 +57,7 @@ jobs:
         run: |
           WHL=$(ls -1 dist/*.whl | head -1)
           pip install "$WHL"
-          pip install pytest responses geopandas shapely pandas pyarrow typer rich keyring
+          pip install pytest responses geopandas shapely pandas pyarrow typer rich keyring "mcp>=1.0"
 
       - name: pytest on installed package
         run: pytest -q -m "not integration"
@@ -74,7 +74,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -e ".[dev,geo,secure]" pytest-cov
+      - run: pip install -e ".[dev,geo,secure,mcp]" pytest-cov
       - run: pytest -q -m "not integration" --cov=eolas_data --cov-report=xml
       - name: Upload coverage
         uses: codecov/codecov-action@v5
