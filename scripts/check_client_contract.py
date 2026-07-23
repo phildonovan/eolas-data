@@ -32,6 +32,18 @@ REQUIRED: dict[str, list[str]] = {
         "test_linz_nz_addresses_bulk_route_and_head",
         "test_client_exports_cache_clear",
     ],
+    "test_mcp_server.py": [
+        "test_eolas_sync_changelog_mode",
+        "test_eolas_get_caps_rows",
+    ],
+    "test_mcp_protocol.py": [
+        "test_stdio_lists_six_tools",
+        "test_stdio_eolas_health_over_wire",
+    ],
+    "test_mcp_integration.py": [
+        "test_mcp_info_nz_cpi_live",
+        "test_mcp_get_nz_cpi_slice_live",
+    ],
 }
 
 

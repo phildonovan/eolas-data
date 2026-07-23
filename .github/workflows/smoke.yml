@@ -25,8 +25,8 @@ jobs:
             exit 1
           fi
 
-      - name: Install package + dev/geo deps (as users would)
-        run: pip install ".[dev,geo]"
+      - name: Install package + dev/geo/mcp deps (as users would)
+        run: pip install ".[dev,geo,mcp]"
 
       - name: Live smoke tests
         env:
@@ -36,4 +36,4 @@ jobs:
             echo "EOLAS_API_KEY secret not configured — skipping scheduled smoke tests."
             exit 0
           fi
-          pytest -q -m integration tests/test_smoke_live.py
+          pytest -q -m integration tests/test_smoke_live.py tests/test_mcp_integration.py

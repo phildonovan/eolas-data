@@ -3,6 +3,28 @@
 All notable changes to `eolas-data` are recorded here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## 1.10.0
+
+### Added
+
+- **MCP server (`eolas-mcp`) — now actually present.** `eolas_data/mcp_server.py`
+  exposes the client as Model Context Protocol tools over stdio for agent hosts
+  (Claude Desktop, Cursor, Grok): `eolas_health`, `eolas_search`, `eolas_info`,
+  `eolas_get`, `eolas_download`, `eolas_sync`. A thin wrapper — all HTTP, auth,
+  CDC routing and error mapping stay in `Client`. Agent-safe caps: `eolas_get`
+  is hard-limited to 500 rows and `eolas_search` to 50, so nothing streams a
+  multi-million-row table into a model's context. Install with
+  `pip install eolas-data[mcp]`; run `eolas-mcp` or `python -m eolas_data.mcp_server`.
+
+### Fixed
+
+- **The `[mcp]` extra and `eolas-mcp` entry point have been broken since 1.3.22.**
+  `pyproject.toml` declared both, but the `eolas_data.mcp_server` module was never
+  committed — so `pip install eolas-data[mcp]` created an `eolas-mcp` command that
+  failed with `ModuleNotFoundError` on every release from 1.3.22 to 1.9.1.
+  Verified against a clean install of the published 1.9.1 wheel. This release
+  ships the module the packaging has been promising.
+
 ## 1.9.1
 
 ### Changed
