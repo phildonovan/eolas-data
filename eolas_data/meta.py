@@ -59,6 +59,15 @@ _TABLE_META_KEYS = (
     "last_refreshed_at",
     "previous_snapshots",
     "date_filter_column",
+    # Long/wide reshape contract (2026-07-27) — consumed by
+    # eolas_data.reshape.pivot_longer()/pivot_wider(). Without these in the
+    # allowlist they would be silently dropped by split_meta() before ever
+    # reaching df.attrs["eolas_meta"], even though the API returns them.
+    "layout",
+    "time_columns",
+    "id_columns",
+    "value_columns",
+    "measure_name_column",
 )
 
 # Mirrors app/streaming.py::detect_date_col — columns that /data?start=&end= filter on.

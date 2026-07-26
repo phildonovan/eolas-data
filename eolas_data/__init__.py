@@ -16,8 +16,10 @@ from .exceptions import (
     EolasError,
     NotFoundError,
     RateLimitError,
+    ReshapeError,
     WatermarkExpired,
 )
+from .reshape import pivot_longer, pivot_wider
 
 # Single source of truth: read the installed distribution's version so
 # __version__, `eolas version`, and the User-Agent can never drift from
@@ -44,4 +46,7 @@ __all__ = [
     "ChangesUpgradeRequired",
     "ChangesLicenceRestricted",
     "WatermarkExpired",
+    "ReshapeError",
+    "pivot_longer",
+    "pivot_wider",
 ]
