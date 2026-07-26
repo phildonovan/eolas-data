@@ -28,7 +28,7 @@ from .reshape import pivot_longer, pivot_wider
 try:
     __version__ = _pkg_version("eolas-data")
 except PackageNotFoundError:  # pragma: no cover - uninstalled source checkout
-    __version__ = "1.10.0"
+    __version__ = "1.11.0"
 
 __all__ = [
     "Client",

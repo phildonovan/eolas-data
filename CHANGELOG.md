@@ -3,6 +3,19 @@
 All notable changes to `eolas-data` are recorded here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## 1.11.0
+
+### Added
+
+- **`pivot_longer()` / `pivot_wider()` — client-side long/wide reshape.** Explicit,
+  module-level functions (never called automatically by `Client.get()`). They read the
+  new server-side `layout` metadata (`long`/`wide`/`feature`/`entity` + id/value/measure
+  columns) and **refuse rather than guess**: a `ReshapeError` when a table has no layout
+  metadata, or a `feature`/`entity` layout, or a geometry column present. `pivot_longer`
+  reattaches each measure's `series_id` on the melt; `pivot_wider` raises on non-unique
+  keys instead of silently collapsing. Both re-declare the reshaped frame's new layout so
+  `longer`↔`wider` round-trips. Re-aligns the version line with `eolas` (R) at 1.11.0.
+
 ## 1.10.0
 
 ### Added
