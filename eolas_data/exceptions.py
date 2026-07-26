@@ -26,13 +26,17 @@ class APIError(EolasError):
 # specifically can match the narrower type).
 # ---------------------------------------------------------------------------
 
+
 class BulkUpgradeRequired(APIError):
     """Raised on HTTP 402: the requested freshness level requires a Pro plan."""
 
-    def __init__(self, message: str = (
-        "Fresh bulk downloads are a Pro feature. Free accounts get the latest "
-        "monthly snapshot — see https://eolas.fyi/pricing."
-    )):
+    def __init__(
+        self,
+        message: str = (
+            "Fresh bulk downloads are a Pro feature. Free accounts get the latest "
+            "monthly snapshot — see https://eolas.fyi/pricing."
+        ),
+    ):
         super().__init__(402, message)
 
 
@@ -50,11 +54,14 @@ class BulkLicenceRestricted(APIError):
 class BulkNotYetAvailable(APIError):
     """Raised on HTTP 503: the monthly snapshot for this dataset does not exist yet."""
 
-    def __init__(self, message: str = (
-        "Monthly bulk snapshots are still rolling out for this dataset. "
-        "Try again after the 1st of next month, or upgrade to Pro for "
-        "on-demand current snapshots — see https://eolas.fyi/pricing."
-    )):
+    def __init__(
+        self,
+        message: str = (
+            "Monthly bulk snapshots are still rolling out for this dataset. "
+            "Try again after the 1st of next month, or upgrade to Pro for "
+            "on-demand current snapshots — see https://eolas.fyi/pricing."
+        ),
+    ):
         super().__init__(503, message)
 
 
@@ -62,13 +69,17 @@ class BulkNotYetAvailable(APIError):
 # CDC / changelog-specific exceptions
 # ---------------------------------------------------------------------------
 
+
 class ChangesUpgradeRequired(APIError):
     """Raised on HTTP 402 from /changes: changelog sync requires Pro or higher."""
 
-    def __init__(self, message: str = (
-        "Changelog sync is a Pro feature. "
-        "Upgrade at https://eolas.fyi/pricing or use sync_bulk() instead."
-    )):
+    def __init__(
+        self,
+        message: str = (
+            "Changelog sync is a Pro feature. "
+            "Upgrade at https://eolas.fyi/pricing or use sync_bulk() instead."
+        ),
+    ):
         super().__init__(402, message)
 
 
@@ -77,6 +88,17 @@ class ChangesLicenceRestricted(APIError):
 
     def __init__(self, message: str):
         super().__init__(403, message)
+
+
+class ReshapeError(EolasError):
+    """Raised by :func:`eolas_data.reshape.pivot_longer`/`pivot_wider`.
+
+    Deliberate refusal, not a fallback to inference: a dataset with no
+    `layout` metadata, a `layout` of `"feature"`/`"entity"`, or a geometry
+    column present all raise this rather than guessing a date/period/value
+    shape. Mirrors the reasoning behind removing `Dataset.plot_dataset()` /
+    R's `eolas_plot()` in v1.3.0 — see `dataset.py`.
+    """
 
 
 class WatermarkExpired(APIError):
