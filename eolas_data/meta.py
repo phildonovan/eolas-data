@@ -56,6 +56,7 @@ _TABLE_META_KEYS = (
     "pk_columns",
     "current_snapshot_id",
     "refresh_cadence",
+    "observation_frequency",
     "last_refreshed_at",
     "previous_snapshots",
     "date_filter_column",
