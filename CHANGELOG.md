@@ -3,6 +3,17 @@
 All notable changes to `eolas-data` are recorded here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## 1.12.0
+
+### Added
+
+- **`observation_frequency` in dataset metadata.** `Client.info()` / the metadata
+  attached to fetched frames now surfaces the dataset's **observation frequency** —
+  the grain of each row's time axis (`quarterly`, `monthly`, `annual`, …), distinct
+  from `refresh_cadence` (the source *publish* cadence). E.g. `nz_cpi` is
+  `observation_frequency="quarterly"` but `refresh_cadence="monthly"`. `null` for
+  non-time-series datasets. (Server-side field added in eolas #193.)
+
 ## 1.11.0
 
 ### Added
