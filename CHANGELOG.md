@@ -3,7 +3,14 @@
 All notable changes to `eolas-data` are recorded here. This project follows
 [Semantic Versioning](https://semver.org/).
 
-## 1.12.0
+## 1.12.1
+
+### Fixed
+
+- **`[mcp]` extra unbreakable install.** Pinned `mcp>=1.0,<2` — `mcp 2.0.0` removed
+  `mcp.server.fastmcp`, so `eolas_data.mcp_server`'s `from mcp.server.fastmcp import
+  FastMCP` (hence `eolas-mcp`) failed to import under the unbounded `mcp>=1.0`. (1.12.0
+  was tagged but never published — its build failed on exactly this; 1.12.1 supersedes it.)
 
 ### Added
 
