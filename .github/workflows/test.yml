@@ -56,8 +56,12 @@ jobs:
       - name: Install built wheel + test deps (as users would)
         run: |
           WHL=$(ls -1 dist/*.whl | head -1)
-          pip install "$WHL"
-          pip install pytest responses geopandas shapely pandas pyarrow typer rich keyring "mcp>=1.0"
+          # Install the mcp extra FROM THE WHEEL so its own pin (mcp>=1.0,<2)
+          # governs — a bare "mcp>=1.0" here pulled mcp 2.x, which removed
+          # mcp.server.fastmcp and broke this job on every run since 2026-07-30
+          # (same class publish.yml was already hardened against).
+          pip install "$WHL[mcp]"
+          pip install pytest responses geopandas shapely pandas pyarrow typer rich keyring
 
       - name: pytest on installed package
         run: pytest -q -m "not integration"
