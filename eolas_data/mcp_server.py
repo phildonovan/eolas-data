@@ -180,13 +180,25 @@ def eolas_get(
 
     # Client.get returns a Dataset (DataFrame subclass).
     row_count = len(df)
-    return {
+    out = {
         "name": name,
         "row_count": row_count,
         "limit_applied": cap,
         "truncated": row_count >= cap,
         "rows": _df_records(df, max_rows=cap),
     }
+    # Plan-cap truncation (C22): the server capped the window the client
+    # sliced from, so these are NOT the dataset's most recent rows.
+    meta = getattr(df, "eolas_meta", None) or {}
+    if meta.get("truncated"):
+        out["plan_truncated"] = True
+        out["plan_row_cap"] = meta.get("row_cap")
+        out["warning"] = (
+            "Response was capped by the plan row limit before slicing; rows "
+            "are the latest within a file-order slice, not the dataset's most "
+            "recent. Use start=/end= or eolas_download for the full table."
+        )
+    return out
 
 
 @mcp.tool()

@@ -344,6 +344,22 @@ class Client:
             meta_cache=self._meta_cache if meta else None,
         )
 
+    @staticmethod
+    def _warn_if_truncated(name, headers, user_limit: Optional[int] = None) -> dict:
+        """Warn (UserWarning) when a /data response carries X-Eolas-Truncated: true.
+
+        Returns the parsed truncation dict so callers can stamp metadata.
+        """
+        from .meta import truncation_from_headers, truncation_message
+
+        trunc = truncation_from_headers(headers)
+        msg = truncation_message(str(name), trunc, user_limit)
+        if msg:
+            import warnings
+
+            warnings.warn(msg, UserWarning, stacklevel=3)
+        return trunc
+
     def _attach_dataset_meta(
         self,
         result: "pd.DataFrame",
@@ -669,6 +685,7 @@ class Client:
 
         if path is None:
             resp = self._raw_get(f"/v1/datasets/{name}/data", params=params)
+            self._warn_if_truncated(name, resp.headers, limit)
             return resp.content
 
         out = pathlib.Path(path).expanduser().resolve()
@@ -682,6 +699,7 @@ class Client:
             params=params,
             stream=True,
         )
+        self._warn_if_truncated(name, resp.headers, limit)
         total = int(resp.headers.get("Content-Length", 0)) or None
         self._stream_to_file_with_progress(
             resp,
@@ -2619,6 +2637,13 @@ class Client:
 
         df = sort_by_date(df)
         df = apply_row_limit(df, user_limit)
+
+        # Plan-cap truncation (C22): the server serves a file-order slice and
+        # says so in X-Eolas-Truncated. Surface it loudly on EVERY return path
+        # (arrow / polars / pandas) — a silent 50k slice looks like the whole
+        # table, and a client-side limit= then picks the "latest N" from inside
+        # that slice, not from the dataset.
+        self._warn_if_truncated(name, provenance, user_limit)
 
         # as_arrow on the live path: convert the pandas DataFrame to an Arrow
         # Table, avoiding any shapely allocation.  We convert before the
