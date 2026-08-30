@@ -7,6 +7,7 @@ import responses as resp_lib
 
 from eolas_data import Client, Dataset
 from eolas_data.exceptions import (
+    APIError,
     AuthenticationError,
     BulkLicenceRestricted,
     BulkNotYetAvailable,
@@ -290,6 +291,79 @@ def test_get_limit_on_large_geo_sends_bounded_limit(client):
     assert data_reqs, "expected a /data request"
     assert any("limit=2" in c.request.url for c in data_reqs)
     assert not any("limit=0" in c.request.url for c in data_reqs)
+
+
+@resp_lib.activate
+def test_get_limit_at_safe_slice_boundary_stays_live(client):
+    """limit=10,000 is the largest slice the guard accepts on a large/geo table."""
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_addresses",
+                 json=LARGE_GEO_META, status=200)
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_addresses/data",
+                 json={"data": GEO_RECORDS})
+    with patch.object(client, "get_local") as mock_local:
+        client.get("nz_addresses", limit=10_000)
+    mock_local.assert_not_called()
+    data_reqs = [c for c in resp_lib.calls if "/data" in c.request.url]
+    assert any("limit=10000" in c.request.url for c in data_reqs)
+
+
+@resp_lib.activate
+@pytest.mark.parametrize("limit", [10_001, 50_000, 0])
+def test_get_oversized_limit_on_large_geo_routes_to_bulk_and_trims(client, limit):
+    """Above the 10k safe slice (or limit=0) the API 413s regardless of limit,
+    so get() serves the bulk cache and applies the limit client-side."""
+    sentinel = pd.DataFrame({
+        "address_id": list(range(20)),
+        "geometry_wkt": ["POINT (0 0)"] * 20,
+    })
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_addresses",
+                 json=LARGE_GEO_META, status=200)
+    with patch.object(client, "get_local", return_value=sentinel) as mock_local:
+        result = client.get("nz_addresses", limit=limit)
+    mock_local.assert_called_once()
+    assert not any("/data?" in c.request.url or c.request.url.endswith("/data")
+                   for c in resp_lib.calls)
+    assert len(result) == 20  # limits above the table size are a no-op
+
+
+@resp_lib.activate
+def test_get_oversized_limit_trims_most_recent_from_bulk(client):
+    """Routed limit keeps get()'s most-recent-N semantics on dated tables."""
+    sentinel = pd.DataFrame({
+        "date": pd.to_datetime(["2020-01-01", "2022-01-01", "2021-01-01"]),
+        "value": [1, 3, 2],
+    })
+    big = {**LARGE_GEO_META, "has_geometry": False, "name": "big_series"}
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/big_series", json=big, status=200)
+    with patch.object(client, "get_local", return_value=sentinel):
+        result = client.get("big_series", limit=20_000)
+    # Trimmed to min(limit, n) and sorted by date: the table is only 3 rows.
+    assert list(result["value"]) == [1, 2, 3]
+    sentinel = pd.DataFrame({
+        "date": pd.to_datetime(["2020-01-01", "2022-01-01", "2021-01-01"]),
+        "value": [1, 3, 2],
+    })
+    with patch.object(client, "get_local", return_value=sentinel):
+        result = client.get("big_series", limit=10_001)
+    assert list(result["value"]) == [1, 2, 3]
+
+
+@resp_lib.activate
+def test_get_dimensions_on_large_geo_stays_live_with_verbatim_limit(client):
+    """`dimensions` cannot route to bulk; the limit reaches the API verbatim and
+    the server's 413 (no date filter) is surfaced, not pre-empted."""
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_addresses",
+                 json=LARGE_GEO_META, status=200)
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_addresses/data",
+                 json={"detail": "Dataset 'nz_addresses' has 2,418,264 rows ..."},
+                 status=413)
+    with patch.object(client, "get_local") as mock_local:
+        with pytest.raises(APIError) as exc:
+            client.get("nz_addresses", limit=5, dimensions="auckland")
+    mock_local.assert_not_called()
+    assert exc.value.status_code == 413
+    assert any("dimensions=auckland" in c.request.url and "limit=5" in c.request.url
+               for c in resp_lib.calls if "/data" in c.request.url)
 
 
 @resp_lib.activate

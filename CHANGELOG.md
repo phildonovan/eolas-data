@@ -21,6 +21,16 @@ All notable changes to `eolas-data` are recorded here. This project follows
   that lands on the artifact already on disk is reported as `unchanged` with no
   body download. New `SyncResult.freshness_resolved` and sidecar
   `head_snapshot_id` / `freshness_resolved` fields. (C23)
+- **Client mirror of the live-data 413 guard matches the server rule (2026-08-30).**
+  On a >100,000-row or geometry table with no `start`/`end` date filter the API
+  now serves a live pull only as a slice of `0 < limit <= 10,000` rows without
+  `dimensions`; `limit=None`, `limit=0` and anything larger are refused alike (a
+  positive `limit` was never a server-side back door). `Client._live_pull_blocked()`
+  gains `limit=` / `dimensions=` and the new `_live_slice_allowed()` encodes the
+  exception, so `get(name, limit=50_000)` on such a table is served from the bulk
+  cache and trimmed client-side instead of 413ing; `dimensions` still forces the
+  live path and needs a date filter there. `download()` docs corrected: only
+  `1..10_000` is accepted on those tables. (C2/C3 client mirror)
 
 ## 1.12.1
 
