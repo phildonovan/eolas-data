@@ -677,19 +677,16 @@ class Client:
             params["start"] = start
         if end:
             params["end"] = end
-        if limit is not None:
-            from .rows import resolve_fetch_limit
-
-            fetch_limit, _ = resolve_fetch_limit(limit)
-            params["limit"] = fetch_limit
-        elif start is None and end is None:
-            params["limit"] = 0
-        else:
-            params["limit"] = 0
+        # Send the caller's limit verbatim: unlike get(), download has no
+        # date-sort/trim step, so the server must do the capping (limit=0 would
+        # write the whole table / plan slice to disk).
+        params["limit"] = 0 if limit is None else int(limit)
 
         if path is None:
             resp = self._raw_get(f"/v1/datasets/{name}/data", params=params)
-            self._warn_if_truncated(name, resp.headers, limit)
+            # user_limit=None: the "latest N within the slice" clause only
+            # applies to get(), which trims client-side.
+            self._warn_if_truncated(name, resp.headers)
             return resp.content
 
         out = pathlib.Path(path).expanduser().resolve()
@@ -703,7 +700,7 @@ class Client:
             params=params,
             stream=True,
         )
-        self._warn_if_truncated(name, resp.headers, limit)
+        self._warn_if_truncated(name, resp.headers)
         total = int(resp.headers.get("Content-Length", 0)) or None
         self._stream_to_file_with_progress(
             resp,

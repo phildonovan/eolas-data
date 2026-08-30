@@ -491,6 +491,46 @@ def test_download_live_sends_limit_zero_for_full_dataset(client, tmp_path):
 
 
 @resp_lib.activate
+def test_download_live_sends_user_limit_verbatim(client, tmp_path):
+    # download() has no client-side trim, so limit=12 must reach the server
+    # as limit=12 (not the limit=0 whole-table fetch that get() uses).
+    resp_lib.add(
+        resp_lib.GET,
+        f"{BASE}/v1/datasets/nz_cpi/data",
+        body=FAKE_CSV,
+        content_type="text/csv",
+        status=200,
+    )
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        client.download("nz_cpi", path=tmp_path / "nz_cpi.csv", limit=12)
+    assert "limit=12" in resp_lib.calls[0].request.url
+
+
+@resp_lib.activate
+def test_download_live_capped_warns_without_within_slice_clause(client):
+    resp_lib.add(
+        resp_lib.GET,
+        f"{BASE}/v1/datasets/nz_cpi/data",
+        body=FAKE_CSV,
+        content_type="text/csv",
+        status=200,
+        headers={"X-Eolas-Truncated": "true", "X-Plan-Row-Cap": "50000", "X-Plan": "free"},
+    )
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        client.download("nz_cpi", limit=12)
+    msgs = [str(w.message) for w in caught if issubclass(w.category, UserWarning)]
+    assert any("50,000" in m or "50000" in m for m in msgs), msgs
+    assert not any("WITHIN that slice" in m for m in msgs), msgs
+    assert "limit=12" in resp_lib.calls[0].request.url
+
+
+@resp_lib.activate
 def test_download_live_returns_bytes_when_no_path(client):
     resp_lib.add(
         resp_lib.GET,
