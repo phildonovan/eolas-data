@@ -184,6 +184,40 @@ class TestLivePullBlocked:
     def test_default_argument_preserves_old_behaviour(self):
         assert Client._live_pull_blocked(GEO_INFO) is True
 
+    # ---- safe-slice exception (architecture.md §2.5.4c, 2026-08-30) ----------
+    # 0 < limit <= 10,000 without `dimensions` passes the guard; None, 0,
+    # 10,001+ and any limit with `dimensions` are refused alike.
+
+    def test_small_slice_passes(self):
+        assert Client._live_pull_blocked(GEO_INFO, limit=1) is False
+        assert Client._live_pull_blocked(GEO_INFO, limit=10_000) is False
+
+    def test_boundary_and_bigger_limits_are_blocked(self):
+        assert Client._live_pull_blocked(GEO_INFO, limit=10_001) is True
+        assert Client._live_pull_blocked(GEO_INFO, limit=50_000) is True
+        assert Client._live_pull_blocked(GEO_INFO, limit=200_000) is True
+
+    def test_zero_is_whole_dataset_not_a_slice(self):
+        assert Client._live_pull_blocked(GEO_INFO, limit=0) is True
+
+    def test_dimensions_defeats_the_slice(self):
+        assert Client._live_pull_blocked(GEO_INFO, limit=5, dimensions="auck") is True
+        assert Client._live_pull_blocked(GEO_INFO, limit=5, dimensions="") is False
+
+    def test_slice_irrelevant_when_not_large_or_geo(self):
+        small = {**GEO_INFO, "has_geometry": False, "row_count_at_last_refresh": 67}
+        assert Client._live_pull_blocked(small, limit=0) is False
+        assert Client._live_pull_blocked(small, limit=999_999, dimensions="x") is False
+
+    def test_live_slice_allowed_is_the_servers_test(self):
+        assert Client._SAFE_LIVE_SLICE_ROWS == 10_000
+        assert Client._live_slice_allowed(None) is False
+        assert Client._live_slice_allowed(0) is False
+        assert Client._live_slice_allowed(1) is True
+        assert Client._live_slice_allowed(10_000) is True
+        assert Client._live_slice_allowed(10_001) is False
+        assert Client._live_slice_allowed(10, "auck") is False
+
 
 # ---- bulk-route path --------------------------------------------------------
 # A spatial table ALSO over the row-count threshold stays "blocked" even with

@@ -7,6 +7,7 @@ import responses as resp_lib
 
 from eolas_data import Client, Dataset
 from eolas_data.exceptions import (
+    APIError,
     AuthenticationError,
     BulkLicenceRestricted,
     BulkNotYetAvailable,
@@ -293,6 +294,79 @@ def test_get_limit_on_large_geo_sends_bounded_limit(client):
 
 
 @resp_lib.activate
+def test_get_limit_at_safe_slice_boundary_stays_live(client):
+    """limit=10,000 is the largest slice the guard accepts on a large/geo table."""
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_addresses",
+                 json=LARGE_GEO_META, status=200)
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_addresses/data",
+                 json={"data": GEO_RECORDS})
+    with patch.object(client, "get_local") as mock_local:
+        client.get("nz_addresses", limit=10_000)
+    mock_local.assert_not_called()
+    data_reqs = [c for c in resp_lib.calls if "/data" in c.request.url]
+    assert any("limit=10000" in c.request.url for c in data_reqs)
+
+
+@resp_lib.activate
+@pytest.mark.parametrize("limit", [10_001, 50_000, 0])
+def test_get_oversized_limit_on_large_geo_routes_to_bulk_and_trims(client, limit):
+    """Above the 10k safe slice (or limit=0) the API 413s regardless of limit,
+    so get() serves the bulk cache and applies the limit client-side."""
+    sentinel = pd.DataFrame({
+        "address_id": list(range(20)),
+        "geometry_wkt": ["POINT (0 0)"] * 20,
+    })
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_addresses",
+                 json=LARGE_GEO_META, status=200)
+    with patch.object(client, "get_local", return_value=sentinel) as mock_local:
+        result = client.get("nz_addresses", limit=limit)
+    mock_local.assert_called_once()
+    assert not any("/data?" in c.request.url or c.request.url.endswith("/data")
+                   for c in resp_lib.calls)
+    assert len(result) == 20  # limits above the table size are a no-op
+
+
+@resp_lib.activate
+def test_get_oversized_limit_trims_most_recent_from_bulk(client):
+    """Routed limit keeps get()'s most-recent-N semantics on dated tables."""
+    sentinel = pd.DataFrame({
+        "date": pd.to_datetime(["2020-01-01", "2022-01-01", "2021-01-01"]),
+        "value": [1, 3, 2],
+    })
+    big = {**LARGE_GEO_META, "has_geometry": False, "name": "big_series"}
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/big_series", json=big, status=200)
+    with patch.object(client, "get_local", return_value=sentinel):
+        result = client.get("big_series", limit=20_000)
+    # Trimmed to min(limit, n) and sorted by date: the table is only 3 rows.
+    assert list(result["value"]) == [1, 2, 3]
+    sentinel = pd.DataFrame({
+        "date": pd.to_datetime(["2020-01-01", "2022-01-01", "2021-01-01"]),
+        "value": [1, 3, 2],
+    })
+    with patch.object(client, "get_local", return_value=sentinel):
+        result = client.get("big_series", limit=10_001)
+    assert list(result["value"]) == [1, 2, 3]
+
+
+@resp_lib.activate
+def test_get_dimensions_on_large_geo_stays_live_with_verbatim_limit(client):
+    """`dimensions` cannot route to bulk; the limit reaches the API verbatim and
+    the server's 413 (no date filter) is surfaced, not pre-empted."""
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_addresses",
+                 json=LARGE_GEO_META, status=200)
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_addresses/data",
+                 json={"detail": "Dataset 'nz_addresses' has 2,418,264 rows ..."},
+                 status=413)
+    with patch.object(client, "get_local") as mock_local:
+        with pytest.raises(APIError) as exc:
+            client.get("nz_addresses", limit=5, dimensions="auckland")
+    mock_local.assert_not_called()
+    assert exc.value.status_code == 413
+    assert any("dimensions=auckland" in c.request.url and "limit=5" in c.request.url
+               for c in resp_lib.calls if "/data" in c.request.url)
+
+
+@resp_lib.activate
 def test_get_no_geometry_column_returns_dataset(client):
     """Datasets without a geometry_wkt column still return a Dataset even with as_geo=None."""
     resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi/data", json={"data": RECORDS})
@@ -488,6 +562,46 @@ def test_download_live_sends_limit_zero_for_full_dataset(client, tmp_path):
     )
     client.download("nz_cpi", path=tmp_path / "nz_cpi.csv")
     assert "limit=0" in resp_lib.calls[0].request.url
+
+
+@resp_lib.activate
+def test_download_live_sends_user_limit_verbatim(client, tmp_path):
+    # download() has no client-side trim, so limit=12 must reach the server
+    # as limit=12 (not the limit=0 whole-table fetch that get() uses).
+    resp_lib.add(
+        resp_lib.GET,
+        f"{BASE}/v1/datasets/nz_cpi/data",
+        body=FAKE_CSV,
+        content_type="text/csv",
+        status=200,
+    )
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        client.download("nz_cpi", path=tmp_path / "nz_cpi.csv", limit=12)
+    assert "limit=12" in resp_lib.calls[0].request.url
+
+
+@resp_lib.activate
+def test_download_live_capped_warns_without_within_slice_clause(client):
+    resp_lib.add(
+        resp_lib.GET,
+        f"{BASE}/v1/datasets/nz_cpi/data",
+        body=FAKE_CSV,
+        content_type="text/csv",
+        status=200,
+        headers={"X-Eolas-Truncated": "true", "X-Plan-Row-Cap": "50000", "X-Plan": "free"},
+    )
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        client.download("nz_cpi", limit=12)
+    msgs = [str(w.message) for w in caught if issubclass(w.category, UserWarning)]
+    assert any("50,000" in m or "50000" in m for m in msgs), msgs
+    assert not any("WITHIN that slice" in m for m in msgs), msgs
+    assert "limit=12" in resp_lib.calls[0].request.url
 
 
 @resp_lib.activate

@@ -29,12 +29,77 @@ def provenance_from_headers(headers) -> dict:
     return out
 
 
+def truncation_from_headers(headers) -> dict:
+    """Read the plan-cap truncation contract from /data response headers.
+
+    The server sets ``X-Eolas-Truncated: true`` (plus ``X-Plan-Row-Cap`` and
+    ``X-Plan``) when the caller's plan capped the row window below what was
+    requested. Returns ``{}`` when the header is absent (old server / bulk
+    path), otherwise ``{"truncated": bool, "row_cap": int | None, "plan": str}``.
+    """
+    if headers is None:
+        return {}
+    get = (
+        headers.get if hasattr(headers, "get") else lambda k, d=None: headers.get(k, d)
+    )
+    raw = get("X-Eolas-Truncated")
+    if raw is None:
+        return {}
+    out: dict = {"truncated": str(raw).strip().lower() == "true"}
+    cap = get("X-Plan-Row-Cap")
+    if cap is not None:
+        try:
+            out["row_cap"] = int(cap)
+        except (TypeError, ValueError):
+            out["row_cap"] = None
+    plan = get("X-Plan")
+    if plan:
+        out["plan"] = str(plan)
+    return out
+
+
+def truncation_message(
+    name: str, trunc: dict, user_limit: Optional[int] = None
+) -> Optional[str]:
+    """Human-readable warning for a plan-capped /data response, or ``None``."""
+    if not trunc.get("truncated"):
+        return None
+    cap = trunc.get("row_cap")
+    plan = trunc.get("plan")
+    cap_txt = f"{cap:,} rows" if isinstance(cap, int) else "the plan row cap"
+    plan_txt = f" ({plan} plan)" if plan else ""
+    msg = (
+        f"{name!r}: response truncated to {cap_txt}{plan_txt}. This is a "
+        "file-order slice, NOT the full dataset"
+    )
+    if user_limit and int(user_limit) > 0:
+        msg += (
+            f"; limit={int(user_limit)} returned the latest rows WITHIN that "
+            "slice, not the dataset's most recent rows"
+        )
+    msg += (
+        ". Check df.eolas_meta['truncated']. Use start=/end= to narrow, "
+        "get_local()/sync_bulk() for the whole table, or upgrade at "
+        "https://eolas.fyi/pricing."
+    )
+    return msg
+
+
 def merge_provenance(table_meta: Optional[dict], headers) -> dict:
-    """Merge catalogue metadata with live response headers (headers win when set)."""
+    """Merge catalogue metadata with live response headers (headers win when set).
+
+    Also stamps ``truncated`` / ``row_cap`` from the plan-cap headers so a
+    capped slice is never presented as the full dataset (C22).
+    """
     merged = dict(table_meta or {})
     for key, val in provenance_from_headers(headers).items():
         if val:
             merged[key] = val
+    trunc = truncation_from_headers(headers)
+    if trunc:
+        merged["truncated"] = trunc["truncated"]
+        if trunc["truncated"]:
+            merged["row_cap"] = trunc.get("row_cap")
     return merged
 
 
@@ -182,6 +247,13 @@ def meta_subtitle(table_meta: Optional[dict]) -> str:
     cadence = (table_meta.get("refresh_cadence") or "").strip()
     if cadence:
         parts.append(f"refreshed {cadence}")
+    if table_meta.get("truncated"):
+        cap = table_meta.get("row_cap")
+        parts.append(
+            f"TRUNCATED to {cap:,} rows by plan cap"
+            if isinstance(cap, int)
+            else "TRUNCATED by plan cap"
+        )
     return " · ".join(parts)
 
 

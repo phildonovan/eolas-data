@@ -166,6 +166,10 @@ class SyncResult:
     previous_seq: Optional[int] = None
     current_seq: Optional[int] = None
     ops_applied: Optional[int] = None
+    # Snapshot-specific: which artifact the server actually served
+    # (``"current"`` or ``"monthly"``), read from the final GET response
+    # after redirects. ``None`` when unchanged (no GET) or on an old server.
+    freshness_resolved: Optional[str] = None
 
 
 def _to_geodataframe(df: "pd.DataFrame", force: bool = False):
@@ -344,6 +348,22 @@ class Client:
             meta_cache=self._meta_cache if meta else None,
         )
 
+    @staticmethod
+    def _warn_if_truncated(name, headers, user_limit: Optional[int] = None) -> dict:
+        """Warn (UserWarning) when a /data response carries X-Eolas-Truncated: true.
+
+        Returns the parsed truncation dict so callers can stamp metadata.
+        """
+        from .meta import truncation_from_headers, truncation_message
+
+        trunc = truncation_from_headers(headers)
+        msg = truncation_message(str(name), trunc, user_limit)
+        if msg:
+            import warnings
+
+            warnings.warn(msg, UserWarning, stacklevel=3)
+        return trunc
+
     def _attach_dataset_meta(
         self,
         result: "pd.DataFrame",
@@ -420,9 +440,18 @@ class Client:
         "arrow": ".arrow",
         "json": ".json",
     }
-    # Mirrors the API guard in datasets.py — unbounded live pulls on datasets
-    # above this row count (or with geometry) return HTTP 413.
+    # Mirrors the API guard (``live_pull_guard`` in api/app/routes/datasets.py,
+    # architecture.md §2.5.4c, 2026-08-30): unless a *real* date filter
+    # (``start``/``end`` on a table that has a date column) narrows the scan,
+    # a live pull of a dataset above this row count OR carrying geometry
+    # (unless ``geometry=False`` projects it away) is refused with HTTP 413 --
+    # EXCEPT for a small slice: ``0 < limit <= _SAFE_LIVE_SLICE_ROWS`` with no
+    # ``dimensions``. ``limit=0``, ``limit > 100_000`` and anything between
+    # 10_000 and 100_000 are all refused alike; a positive ``limit`` is not a
+    # back door. ``dimensions`` is a post-read substring match that may still
+    # walk the whole table, so with it set even a small limit is refused.
     _LARGE_DATASET_ROW_THRESHOLD = 100_000
+    _SAFE_LIVE_SLICE_ROWS = 10_000
 
     @staticmethod
     def _bulk_export_allowed(meta: dict) -> bool:
@@ -459,8 +488,34 @@ class Client:
         return out
 
     @classmethod
-    def _live_pull_blocked(cls, meta: dict, geometry: bool = True) -> bool:
-        """True when limit=0 with no date bounds would hit the API 413 guard.
+    def _live_slice_allowed(
+        cls, limit: Optional[int], dimensions: Optional[str] = None
+    ) -> bool:
+        """True when ``limit``/``dimensions`` form the guard's safe-slice exception.
+
+        Exactly the server's test: ``0 < limit <= 10_000`` and no ``dimensions``.
+        ``None`` and ``0`` both mean "whole dataset" and are not a slice.
+        """
+        if limit is None or dimensions:
+            return False
+        return 0 < int(limit) <= cls._SAFE_LIVE_SLICE_ROWS
+
+    @classmethod
+    def _live_pull_blocked(
+        cls,
+        meta: dict,
+        geometry: bool = True,
+        *,
+        limit: Optional[int] = None,
+        dimensions: Optional[str] = None,
+    ) -> bool:
+        """True when a live ``/data`` pull with no date bounds would be a 413.
+
+        Mirrors ``live_pull_guard`` (architecture.md §2.5.4c): the dataset is
+        large (``row_count_at_last_refresh > 100_000``) or spatial, AND the
+        request is not a safe slice (``0 < limit <= 10_000`` without
+        ``dimensions``). With the defaults (``limit=None``) this answers "would
+        an unbounded pull be refused?", which is what bulk routing needs.
 
         ``geometry=False`` means the caller asked the API to project
         ``geometry_wkt`` away at the scan, which is exactly the condition the
@@ -468,10 +523,17 @@ class Client:
         Leaving it in would keep routing attributes-only pulls to a bulk
         download, defeating the point. The row-count trigger still applies:
         dropping a column doesn't reduce the number of rows.
+
+        Callers that apply a real ``start``/``end`` date filter must not consult
+        this at all: a binding date filter is pushed into the Iceberg scan and
+        skips the guard server-side. (``start``/``end`` on a date-less table
+        does NOT count — the server 400s that; this client strips them first.)
         """
         row_count = int(meta.get("row_count_at_last_refresh") or 0)
         geo_blocks = bool(meta.get("has_geometry")) and geometry
-        return geo_blocks or row_count > cls._LARGE_DATASET_ROW_THRESHOLD
+        if not (geo_blocks or row_count > cls._LARGE_DATASET_ROW_THRESHOLD):
+            return False
+        return not cls._live_slice_allowed(limit, dimensions)
 
     @staticmethod
     def _require_bulk_export(meta: dict, name: Union[str, "DatasetName"]) -> None:
@@ -621,10 +683,12 @@ class Client:
 
         This is the **live** path. It suits small/medium tabular datasets and any
         table where bulk export is unavailable (e.g. OECD ``nz_cpi``). It does
-        **not** auto-route: a whole-dataset pull (``limit=None``) on a >100k-row or
-        geospatial table is refused by the API with HTTP 413 — the same guard
-        :meth:`get` transparently satisfies from the bulk cache. For those tables
-        use :meth:`download_bulk` (when bulk export is permitted) or :meth:`get`.
+        **not** auto-route: on a >100k-row or geospatial table without a
+        ``start``/``end`` date filter the API only serves a slice of
+        ``0 < limit <= 10_000`` rows; ``limit=None`` (whole dataset), ``0`` and
+        anything larger are refused with HTTP 413 — the same guard :meth:`get`
+        transparently satisfies from the bulk cache. For those tables use
+        :meth:`download_bulk` (when bulk export is permitted) or :meth:`get`.
 
         Args:
             name: Dataset identifier, e.g. ``"nz_cpi"``.
@@ -633,7 +697,8 @@ class Client:
             start: ISO date lower bound.
             end: ISO date upper bound.
             limit: Max rows. ``None`` (default) requests the full dataset (subject
-                to plan caps). Pass an integer to cap rows.
+                to plan caps). Pass an integer to cap rows; on large/geo tables
+                without ``start``/``end`` only ``1..10_000`` is accepted.
             progress: Download progress bar control (``"download"`` phase only).
 
         Returns:
@@ -657,18 +722,16 @@ class Client:
             params["start"] = start
         if end:
             params["end"] = end
-        if limit is not None:
-            from .rows import resolve_fetch_limit
-
-            fetch_limit, _ = resolve_fetch_limit(limit)
-            params["limit"] = fetch_limit
-        elif start is None and end is None:
-            params["limit"] = 0
-        else:
-            params["limit"] = 0
+        # Send the caller's limit verbatim: unlike get(), download has no
+        # date-sort/trim step, so the server must do the capping (limit=0 would
+        # write the whole table / plan slice to disk).
+        params["limit"] = 0 if limit is None else int(limit)
 
         if path is None:
             resp = self._raw_get(f"/v1/datasets/{name}/data", params=params)
+            # user_limit=None: the "latest N within the slice" clause only
+            # applies to get(), which trims client-side.
+            self._warn_if_truncated(name, resp.headers)
             return resp.content
 
         out = pathlib.Path(path).expanduser().resolve()
@@ -682,6 +745,7 @@ class Client:
             params=params,
             stream=True,
         )
+        self._warn_if_truncated(name, resp.headers)
         total = int(resp.headers.get("Content-Length", 0)) or None
         self._stream_to_file_with_progress(
             resp,
@@ -816,7 +880,14 @@ class Client:
         # HEAD the canonical URL to read X-Snapshot-Version cheaply.
         # We follow redirects on the HEAD so we land on the versioned CDN URL
         # that carries the header.
-        current_sid = self._head_snapshot_version(canonical_url, params=params)
+        #
+        # NB (C23): the HEAD reports the *live* snapshot id for
+        # freshness=current, but the GET may 302 to the monthly artifact when
+        # the live one hasn't been materialised. The HEAD id is therefore only
+        # a cheap "maybe changed" signal — the id we stamp in the sidecar is
+        # always taken from the final GET response (see below).
+        head_sid = self._head_snapshot_version(canonical_url, params=params)
+        current_sid = head_sid
 
         # No-op fast path: snapshot hasn't changed AND file exists on disk.
         if (
@@ -840,6 +911,31 @@ class Client:
         show = self._resolve_show_progress(progress, "download")
         try:
             resp = self._raw_bulk_get(bulk_path, params=params, stream=True)
+            # Stamp what we actually RECEIVED, not what HEAD advertised: the
+            # final response (after any 302 to the monthly artifact) carries
+            # the real snapshot id and the resolved freshness.
+            received_sid, freshness_resolved = self._received_snapshot_info(resp)
+            if received_sid:
+                current_sid = received_sid
+            # The redirect landed on the artifact we already hold: don't pull
+            # the (possibly multi-GB) body again and don't report "updated".
+            if (
+                not force
+                and prev is not None
+                and received_sid
+                and prev.get("snapshot_id") == received_sid
+                and out.exists()
+            ):
+                resp.close()
+                print(f"Using cached {out.name} (up to date).", file=sys.stderr)
+                return SyncResult(
+                    status="unchanged",
+                    previous_snapshot_id=prev.get("snapshot_id"),
+                    current_snapshot_id=received_sid,
+                    path=out,
+                    bytes_downloaded=0,
+                    freshness_resolved=freshness_resolved,
+                )
             total = int(resp.headers.get("Content-Length", 0)) or None
             bytes_dl = self._stream_to_file_with_progress(
                 resp,
@@ -870,6 +966,8 @@ class Client:
             "schema_version": _SIDECAR_SCHEMA_VERSION,
             "name": str(name),
             "snapshot_id": current_sid,
+            "head_snapshot_id": head_sid,
+            "freshness_resolved": freshness_resolved,
             "format": fmt,
             "freshness": freshness,
             "downloaded_at": datetime.datetime.now(datetime.timezone.utc).strftime(
@@ -887,6 +985,7 @@ class Client:
             current_snapshot_id=current_sid,
             path=out,
             bytes_downloaded=bytes_dl,
+            freshness_resolved=freshness_resolved,
         )
 
     # ------------------------------------------------------------------
@@ -1572,6 +1671,33 @@ class Client:
         resp = self._session.head(full_url, params=params, allow_redirects=True)
         self._raise_for_bulk_status(resp)
         return resp.headers.get("X-Snapshot-Version", "")
+
+    @staticmethod
+    def _received_snapshot_info(
+        resp: requests.Response,
+    ) -> tuple[str, Optional[str]]:
+        """Return ``(snapshot_id, freshness_resolved)`` for the artifact actually served.
+
+        Reads ``X-Snapshot-Version`` and ``X-Freshness`` from the FINAL
+        response after redirects; ``X-Eolas-Freshness-Resolved`` from any
+        302 hop in ``resp.history`` wins for the freshness label (it is the
+        server's explicit fallback signal). Empty string / ``None`` when the
+        headers are absent (stub servers).
+        """
+        sid = resp.headers.get("X-Snapshot-Version", "") or ""
+        freshness: Optional[str] = None
+        for hop in getattr(resp, "history", None) or []:
+            val = hop.headers.get("X-Eolas-Freshness-Resolved") or hop.headers.get(
+                "X-Freshness-Fallback"
+            )
+            if val:
+                freshness = str(val)
+        if not freshness:
+            val = resp.headers.get("X-Eolas-Freshness-Resolved") or resp.headers.get(
+                "X-Freshness"
+            )
+            freshness = str(val) if val else None
+        return sid, freshness
 
     def _raw_bulk_get(
         self,
@@ -2407,7 +2533,13 @@ class Client:
             limit:  Max rows to return. Default ``None`` requests the full dataset
                     (server enforces a 50,000-row cap on Free/Starter plans; Pro is
                     unlimited). When set with a ``date`` column, returns the
-                    **most recent** N rows (not the oldest).
+                    **most recent** N rows (not the oldest). On large
+                    (>100,000-row) or geometry tables without ``start``/``end``
+                    the live API only serves a slice of at most 10,000 rows
+                    (and none with ``dimensions``); ``None``, ``0`` and larger
+                    limits are refused with HTTP 413, so ``get()`` serves them
+                    from the bulk cache (:meth:`get_local`) and applies the
+                    limit client-side.
             as_geo: Convert geospatial datasets to a ``GeoDataFrame``.
                     ``None`` (default) auto-converts when the dataset has a
                     ``geometry_wkt`` column AND ``geopandas`` is importable.
@@ -2437,7 +2569,10 @@ class Client:
             dimensions: Case-insensitive substring filter on the dataset's
                     dimension columns (e.g. ``"auckland"``). Applied server-side
                     on the live ``/data`` path; passing it forces the live path
-                    (the bulk cache has no per-request dimension filter).
+                    (the bulk cache has no per-request dimension filter). It is
+                    a post-read match, not an Iceberg filter, so on a large or
+                    geometry table it does **not** make a small ``limit`` a safe
+                    slice: without ``start``/``end`` the API returns HTTP 413.
             geometry: When ``False``, ask the API to omit the ``geometry_wkt``
                     column. It is projected away at the storage layer, so it is
                     never read or transferred — much faster and smaller on TA/RC
@@ -2502,12 +2637,18 @@ class Client:
                     stacklevel=2,
                 )
 
-        # ---- whole-dataset pull on large/geo tables → bulk cache -------------
-        # Matches the API 413 guard: limit=0 with no start/end on >100k-row or
-        # geometry datasets is refused. Transparently serve from get_local()
-        # (CDN-backed Parquet/GeoParquet) so client.get("nz_addresses") works.
+        # ---- non-slice pull on large/geo tables → bulk cache -----------------
+        # Matches the API 413 guard (§2.5.4c): with no start/end on a >100k-row
+        # or geometry dataset, only a slice of 0 < limit <= 10,000 rows without
+        # `dimensions` is served live; limit=None, limit=0 and any bigger limit
+        # are refused alike. Transparently serve those from get_local()
+        # (CDN-backed Parquet/GeoParquet) so client.get("nz_addresses") and
+        # client.get("nz_addresses", limit=50_000) both work; the limit is then
+        # applied client-side with get()'s usual most-recent-N semantics.
+        # `dimensions` cannot route (the bulk cache has no per-request filter):
+        # on a large/geo table it needs a date filter and otherwise 413s.
         if (
-            limit is None
+            not self._live_slice_allowed(limit, dimensions)
             and start is None
             and end is None
             and format == "json"
@@ -2547,6 +2688,8 @@ class Client:
                     progress=progress,
                     geometry=geometry,
                 )
+                if limit is not None and int(limit) > 0:
+                    result = apply_row_limit(sort_by_date(result), int(limit))
                 if engine == "polars":
                     try:
                         import polars as pl
@@ -2585,6 +2728,10 @@ class Client:
         # Positive limits on large/geo datasets must be sent to the API — the
         # client normally uses limit=0 and trims client-side for dated series,
         # but limit=0 triggers the API 413 guard on geometry / >100k tables.
+        # Only a safe slice (<= 10,000, no dimensions) reaches here on such a
+        # table without start/end: anything bigger was routed to bulk above,
+        # or (with dimensions / a non-json format / envelope / as_arrow) is
+        # left to the server's 413, whose message names the options.
         if user_limit and int(user_limit) > 0 and start is None and end is None:
             try:
                 info_meta = self._info_cached(name)
@@ -2619,6 +2766,13 @@ class Client:
 
         df = sort_by_date(df)
         df = apply_row_limit(df, user_limit)
+
+        # Plan-cap truncation (C22): the server serves a file-order slice and
+        # says so in X-Eolas-Truncated. Surface it loudly on EVERY return path
+        # (arrow / polars / pandas) — a silent 50k slice looks like the whole
+        # table, and a client-side limit= then picks the "latest N" from inside
+        # that slice, not from the dataset.
+        self._warn_if_truncated(name, provenance, user_limit)
 
         # as_arrow on the live path: convert the pandas DataFrame to an Arrow
         # Table, avoiding any shapely allocation.  We convert before the
