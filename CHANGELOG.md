@@ -3,6 +3,25 @@
 All notable changes to `eolas-data` are recorded here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Fixed
+
+- **Plan-cap truncation is now visible.** `Client.get()` / `download()` read the
+  server's `X-Eolas-Truncated` / `X-Plan-Row-Cap` headers. A capped response now
+  emits a `UserWarning`, stamps `eolas_meta["truncated"]` / `["row_cap"]`, flags
+  `TRUNCATED` in the repr, and says explicitly that `limit=N` on a capped slice is
+  the latest N *within* that file-order slice, not the dataset's most recent N.
+  Previously the 50k Free-plan slice was returned silently as if it were the whole
+  table. (C22)
+- **`sync_bulk()` stamps the snapshot actually received.** The sidecar and
+  `SyncResult.current_snapshot_id` now come from `X-Snapshot-Version` on the final
+  GET response (after any 302 to the monthly artifact), not from the HEAD, which
+  reports the live id even when the live artifact is not materialised. A redirect
+  that lands on the artifact already on disk is reported as `unchanged` with no
+  body download. New `SyncResult.freshness_resolved` and sidecar
+  `head_snapshot_id` / `freshness_resolved` fields. (C23)
+
 ## 1.12.1
 
 ### Fixed

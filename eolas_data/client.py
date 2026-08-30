@@ -166,6 +166,10 @@ class SyncResult:
     previous_seq: Optional[int] = None
     current_seq: Optional[int] = None
     ops_applied: Optional[int] = None
+    # Snapshot-specific: which artifact the server actually served
+    # (``"current"`` or ``"monthly"``), read from the final GET response
+    # after redirects. ``None`` when unchanged (no GET) or on an old server.
+    freshness_resolved: Optional[str] = None
 
 
 def _to_geodataframe(df: "pd.DataFrame", force: bool = False):
@@ -834,7 +838,14 @@ class Client:
         # HEAD the canonical URL to read X-Snapshot-Version cheaply.
         # We follow redirects on the HEAD so we land on the versioned CDN URL
         # that carries the header.
-        current_sid = self._head_snapshot_version(canonical_url, params=params)
+        #
+        # NB (C23): the HEAD reports the *live* snapshot id for
+        # freshness=current, but the GET may 302 to the monthly artifact when
+        # the live one hasn't been materialised. The HEAD id is therefore only
+        # a cheap "maybe changed" signal — the id we stamp in the sidecar is
+        # always taken from the final GET response (see below).
+        head_sid = self._head_snapshot_version(canonical_url, params=params)
+        current_sid = head_sid
 
         # No-op fast path: snapshot hasn't changed AND file exists on disk.
         if (
@@ -858,6 +869,31 @@ class Client:
         show = self._resolve_show_progress(progress, "download")
         try:
             resp = self._raw_bulk_get(bulk_path, params=params, stream=True)
+            # Stamp what we actually RECEIVED, not what HEAD advertised: the
+            # final response (after any 302 to the monthly artifact) carries
+            # the real snapshot id and the resolved freshness.
+            received_sid, freshness_resolved = self._received_snapshot_info(resp)
+            if received_sid:
+                current_sid = received_sid
+            # The redirect landed on the artifact we already hold: don't pull
+            # the (possibly multi-GB) body again and don't report "updated".
+            if (
+                not force
+                and prev is not None
+                and received_sid
+                and prev.get("snapshot_id") == received_sid
+                and out.exists()
+            ):
+                resp.close()
+                print(f"Using cached {out.name} (up to date).", file=sys.stderr)
+                return SyncResult(
+                    status="unchanged",
+                    previous_snapshot_id=prev.get("snapshot_id"),
+                    current_snapshot_id=received_sid,
+                    path=out,
+                    bytes_downloaded=0,
+                    freshness_resolved=freshness_resolved,
+                )
             total = int(resp.headers.get("Content-Length", 0)) or None
             bytes_dl = self._stream_to_file_with_progress(
                 resp,
@@ -888,6 +924,8 @@ class Client:
             "schema_version": _SIDECAR_SCHEMA_VERSION,
             "name": str(name),
             "snapshot_id": current_sid,
+            "head_snapshot_id": head_sid,
+            "freshness_resolved": freshness_resolved,
             "format": fmt,
             "freshness": freshness,
             "downloaded_at": datetime.datetime.now(datetime.timezone.utc).strftime(
@@ -905,6 +943,7 @@ class Client:
             current_snapshot_id=current_sid,
             path=out,
             bytes_downloaded=bytes_dl,
+            freshness_resolved=freshness_resolved,
         )
 
     # ------------------------------------------------------------------
@@ -1590,6 +1629,33 @@ class Client:
         resp = self._session.head(full_url, params=params, allow_redirects=True)
         self._raise_for_bulk_status(resp)
         return resp.headers.get("X-Snapshot-Version", "")
+
+    @staticmethod
+    def _received_snapshot_info(
+        resp: requests.Response,
+    ) -> tuple[str, Optional[str]]:
+        """Return ``(snapshot_id, freshness_resolved)`` for the artifact actually served.
+
+        Reads ``X-Snapshot-Version`` and ``X-Freshness`` from the FINAL
+        response after redirects; ``X-Eolas-Freshness-Resolved`` from any
+        302 hop in ``resp.history`` wins for the freshness label (it is the
+        server's explicit fallback signal). Empty string / ``None`` when the
+        headers are absent (stub servers).
+        """
+        sid = resp.headers.get("X-Snapshot-Version", "") or ""
+        freshness: Optional[str] = None
+        for hop in getattr(resp, "history", None) or []:
+            val = hop.headers.get("X-Eolas-Freshness-Resolved") or hop.headers.get(
+                "X-Freshness-Fallback"
+            )
+            if val:
+                freshness = str(val)
+        if not freshness:
+            val = resp.headers.get("X-Eolas-Freshness-Resolved") or resp.headers.get(
+                "X-Freshness"
+            )
+            freshness = str(val) if val else None
+        return sid, freshness
 
     def _raw_bulk_get(
         self,

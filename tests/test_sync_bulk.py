@@ -497,3 +497,105 @@ def test_cache_clear_meta_only(client):
     assert "nz_parcels" in client._meta_cache
     assert cleared["files"] == []
     assert cleared["meta_cleared"] == 1
+
+
+# ---------------------------------------------------------------------------
+# C23 — stamp the snapshot id of the artifact actually RECEIVED, not HEAD's
+# ---------------------------------------------------------------------------
+
+SNAPSHOT_MONTHLY = "1111111111111111111"
+_CANONICAL = f"{BASE}/v1/bulk/statsnz/nz_cpi"
+
+
+def _register_redirect_to_monthly(head_sid: str, body: bytes = FAKE_PARQUET):
+    """HEAD says `head_sid` (live); GET 302s to the monthly artifact."""
+    from responses import matchers
+
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi",
+                 json=BULK_DATASET_META, status=200)
+    resp_lib.add(resp_lib.HEAD, _CANONICAL, body=b"", status=200,
+                 headers={"X-Snapshot-Version": head_sid})
+    resp_lib.add(
+        resp_lib.GET, _CANONICAL, status=302,
+        match=[matchers.query_param_matcher({"format": "parquet"})],
+        headers={
+            "Location": f"{_CANONICAL}?freshness=monthly&format=parquet",
+            "X-Freshness-Fallback": "monthly",
+            "X-Eolas-Freshness-Resolved": "monthly",
+        },
+    )
+    resp_lib.add(
+        resp_lib.GET, _CANONICAL, body=body,
+        content_type="application/octet-stream", status=200,
+        match=[matchers.query_param_matcher({"freshness": "monthly", "format": "parquet"})],
+        headers={"X-Snapshot-Version": SNAPSHOT_MONTHLY, "X-Freshness": "monthly"},
+    )
+
+
+@resp_lib.activate
+def test_sync_bulk_stamps_received_snapshot_not_head(client, tmp_path):
+    """HEAD advertises the live id (S2) but the GET redirects to monthly (M):
+    the sidecar and SyncResult must carry M — the bytes on disk."""
+    _register_redirect_to_monthly(SNAPSHOT_V2)
+
+    dest = tmp_path / "nz_cpi.parquet"
+    result = client.sync_bulk("nz_cpi", path=dest)
+
+    assert result.status == "downloaded"
+    assert result.current_snapshot_id == SNAPSHOT_MONTHLY
+    assert result.freshness_resolved == "monthly"
+    assert dest.read_bytes() == FAKE_PARQUET
+
+    meta = json.loads(pathlib.Path(str(dest) + ".eolas-meta.json").read_text())
+    assert meta["snapshot_id"] == SNAPSHOT_MONTHLY
+    assert meta["head_snapshot_id"] == SNAPSHOT_V2
+    assert meta["freshness_resolved"] == "monthly"
+
+
+@resp_lib.activate
+def test_sync_bulk_redirect_to_held_artifact_is_unchanged(client, tmp_path):
+    """Sidecar holds M; ETL advanced HEAD to S2 but GET still lands on M.
+    Must NOT re-download the body or report 'updated'."""
+    dest = tmp_path / "nz_cpi.parquet"
+    dest.write_bytes(FAKE_PARQUET)
+    _write_sidecar(dest, SNAPSHOT_MONTHLY)
+    _register_redirect_to_monthly(SNAPSHOT_V2, body=FAKE_PARQUET_V2)
+
+    result = client.sync_bulk("nz_cpi", path=dest)
+
+    assert result.status == "unchanged"
+    assert result.bytes_downloaded == 0
+    assert result.current_snapshot_id == SNAPSHOT_MONTHLY
+    assert result.previous_snapshot_id == SNAPSHOT_MONTHLY
+    assert dest.read_bytes() == FAKE_PARQUET  # untouched
+    meta = json.loads(pathlib.Path(str(dest) + ".eolas-meta.json").read_text())
+    assert meta["snapshot_id"] == SNAPSHOT_MONTHLY
+
+
+@resp_lib.activate
+def test_sync_bulk_force_redownloads_through_redirect(client, tmp_path):
+    dest = tmp_path / "nz_cpi.parquet"
+    dest.write_bytes(FAKE_PARQUET)
+    _write_sidecar(dest, SNAPSHOT_MONTHLY)
+    _register_redirect_to_monthly(SNAPSHOT_V2, body=FAKE_PARQUET_V2)
+
+    result = client.sync_bulk("nz_cpi", path=dest, force=True)
+
+    assert result.status == "updated"
+    assert result.current_snapshot_id == SNAPSHOT_MONTHLY
+    assert dest.read_bytes() == FAKE_PARQUET_V2
+
+
+@resp_lib.activate
+def test_sync_bulk_falls_back_to_head_id_when_get_has_no_header(client, tmp_path):
+    """Stub servers without X-Snapshot-Version on GET: keep the HEAD id."""
+    resp_lib.add(resp_lib.GET, f"{BASE}/v1/datasets/nz_cpi",
+                 json=BULK_DATASET_META, status=200)
+    resp_lib.add(resp_lib.HEAD, _CANONICAL, body=b"", status=200,
+                 headers={"X-Snapshot-Version": SNAPSHOT_V1})
+    resp_lib.add(resp_lib.GET, _CANONICAL, body=FAKE_PARQUET,
+                 content_type="application/octet-stream", status=200)
+
+    result = client.sync_bulk("nz_cpi", path=tmp_path / "nz_cpi.parquet")
+    assert result.current_snapshot_id == SNAPSHOT_V1
+    assert result.freshness_resolved is None
