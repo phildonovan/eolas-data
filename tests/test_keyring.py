@@ -22,7 +22,7 @@ from eolas_data.cli import app
 from eolas_data.client import Client, _KEYRING_SERVICE, _KEYRING_USERNAME
 
 runner = CliRunner()
-BASE = "https://api.eolas.fyi"
+BASE = "https://api.eolas.nz"
 
 # Fake key used throughout
 FAKE_KEY = "vs_testkey_keyring_12345"

@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "eolas-data"
-version = "1.12.1"
-description = "Python client for the eolas.fyi statistical data API (NZ + OECD; Australia on roadmap)"
+version = "1.13.0"
+description = "Python client for the eolas.nz statistical data API (NZ + OECD; Australia on roadmap)"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Virtus Solutions", email = "phil@virtus-solutions.io" }]
@@ -36,8 +36,8 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://eolas.fyi"
-Documentation = "https://docs.eolas.fyi/"
+Homepage = "https://eolas.nz"
+Documentation = "https://docs.eolas.nz/"
 Repository = "https://github.com/phildonovan/eolas-data"
 "Bug Tracker" = "https://github.com/phildonovan/eolas-data/issues"
 

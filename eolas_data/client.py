@@ -41,7 +41,13 @@ _log = logging.getLogger("eolas_data")
 from ._dataset_names import DatasetName  # noqa: F401  (public re-export)
 
 
-BASE_URL = "https://api.eolas.fyi"
+def _default_base_url() -> str:
+    """Prod API host. ``EOLAS_BASE_URL`` wins when set before import."""
+    raw = os.environ.get("EOLAS_BASE_URL", "").strip().rstrip("/")
+    return raw or "https://api.eolas.nz"
+
+
+BASE_URL = _default_base_url()
 
 # (connect, read) seconds. The read timeout is per-socket-read, so a large
 # streaming download is fine as long as bytes keep flowing — it only trips when
@@ -72,7 +78,7 @@ class _TimeoutSession(requests.Session):
             # callers (and the CLI's EolasError handler) get a clean message
             # instead of a stack dump (EH-2). HTTP status errors don't come
             # through here — the client inspects resp.status_code directly.
-            raise EolasError(f"Network error talking to api.eolas.fyi: {exc}") from exc
+            raise EolasError(f"Network error talking to api.eolas.nz: {exc}") from exc
 
 
 # Geometry columns excluded when a caller passes geometry=False. `geometry_wkt`
@@ -206,13 +212,14 @@ def _to_geodataframe(df: "pd.DataFrame", force: bool = False):
 
 
 class Client:
-    """Client for the eolas.fyi statistical data API.
+    """Client for the eolas.nz statistical data API.
 
     Args:
         api_key:  Your API key. Falls back, in order, to the ``EOLAS_API_KEY``
                   env var, the OS keyring, then ``~/.eolas/config.json`` (as
                   written by ``eolas auth set-key``).
-        base_url: Override the API base URL (useful for testing).
+        base_url: Override the API base URL. Defaults to https://api.eolas.nz,
+                  or ``EOLAS_BASE_URL`` if that was set before import.
         cache:    Cache responses in memory for the lifetime of the client.
                   Useful in notebooks to avoid re-fetching on re-runs.
 
@@ -266,7 +273,7 @@ class Client:
         self._session.headers.update(
             {
                 "X-API-Key": self._key,
-                "User-Agent": f"eolas-data/{_ver} (python; +https://eolas.fyi)",
+                "User-Agent": f"eolas-data/{_ver} (python; +https://eolas.nz)",
             }
         )
         # Tri-state Arrow capability memo: None=unknown (try it), True=server
@@ -618,7 +625,7 @@ class Client:
             client.download_bulk("nz_cpi", path="nz_cpi.parquet", progress=False)
 
         See Also:
-            https://docs.eolas.fyi/bulk-downloads/
+            https://docs.eolas.nz/bulk-downloads/
         """
         fmt = format.lower()
         if fmt not in self._BULK_EXTENSIONS:
@@ -833,7 +840,7 @@ class Client:
             print(r.status)           # "updated"
 
         See Also:
-            https://docs.eolas.fyi/bulk-downloads/
+            https://docs.eolas.nz/bulk-downloads/
         """
         fmt = format.lower()
         if fmt not in self._BULK_EXTENSIONS:
@@ -1639,7 +1646,7 @@ class Client:
                                 bytes_written += len(chunk)
                     except requests.RequestException as exc:
                         raise EolasError(
-                            f"Network error while downloading from api.eolas.fyi: {exc}"
+                            f"Network error while downloading from api.eolas.nz: {exc}"
                         ) from exc
             # Verify the whole body arrived before publishing the file. A server
             # that closes early without a transport error is otherwise silent.
@@ -2913,7 +2920,7 @@ class Client:
             raise AuthenticationError(
                 "Invalid or missing API key. Set the EOLAS_API_KEY environment "
                 "variable, or run `eolas auth set-key`. "
-                "Get a free key at https://eolas.fyi/signup"
+                "Get a free key at https://eolas.nz/signup"
             )
         if resp.status_code == 403:
             try:
@@ -2940,7 +2947,7 @@ class Client:
                 parts.append(
                     f"(Blocked at the Cloudflare edge — cf-ray {h.get('cf-ray')}.)"
                 )
-            parts.append("Upgrade for higher limits: https://eolas.fyi/pricing")
+            parts.append("Upgrade for higher limits: https://eolas.nz/pricing")
             raise RateLimitError(" ".join(parts))
         if resp.status_code == 404:
             try:
@@ -2976,7 +2983,7 @@ class Client:
             title = "Bad gateway" if resp.status_code == 502 else "Gateway error"
             cf_ray = resp.headers.get("cf-ray", "")
             parts = [
-                f"{title} (HTTP {resp.status_code}) from api.eolas.fyi — "
+                f"{title} (HTTP {resp.status_code}) from api.eolas.nz — "
                 "the API server was temporarily unavailable.",
             ]
             if resp.status_code in (502, 503, 504):

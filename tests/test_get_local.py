@@ -15,7 +15,7 @@ from eolas_data.exceptions import (
     BulkUpgradeRequired,
 )
 
-BASE = "https://api.eolas.fyi"
+BASE = "https://api.eolas.nz"
 SNAPSHOT_ID = "snap_abc123"
 
 BULK_DATASET_META = {

@@ -43,7 +43,7 @@ from eolas_data.cdc import (
 )
 from eolas_data.exceptions import WatermarkExpired
 
-BASE = "https://api.eolas.fyi"
+BASE = "https://api.eolas.nz"
 
 # ---------------------------------------------------------------------------
 # Helpers — build test DataFrames and Parquet blobs

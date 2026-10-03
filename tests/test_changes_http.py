@@ -13,7 +13,7 @@ from eolas_data.exceptions import (
     WatermarkExpired,
 )
 
-BASE = "https://api.eolas.fyi"
+BASE = "https://api.eolas.nz"
 
 
 @pytest.fixture()

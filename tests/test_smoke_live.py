@@ -1,4 +1,4 @@
-"""Live API smoke tests — run against api.eolas.fyi with a real key.
+"""Live API smoke tests — run against api.eolas.nz with a real key.
 
 Mirrors eolas-r/tests/smoke-live.R and eolas/docs/client-contract.md.
 

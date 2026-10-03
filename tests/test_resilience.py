@@ -18,7 +18,7 @@ from eolas_data import Client
 from eolas_data.client import _DEFAULT_TIMEOUT, _TimeoutSession
 from eolas_data.exceptions import EolasError
 
-BASE = "https://api.eolas.fyi"
+BASE = "https://api.eolas.nz"
 
 
 @pytest.fixture()

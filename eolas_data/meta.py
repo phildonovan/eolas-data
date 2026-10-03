@@ -80,7 +80,7 @@ def truncation_message(
     msg += (
         ". Check df.eolas_meta['truncated']. Use start=/end= to narrow, "
         "get_local()/sync_bulk() for the whole table, or upgrade at "
-        "https://eolas.fyi/pricing."
+        "https://eolas.nz/pricing."
     )
     return msg
 

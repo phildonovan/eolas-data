@@ -15,7 +15,7 @@ import responses as resp_lib
 
 from eolas_data import Client
 
-BASE = "https://api.eolas.fyi"
+BASE = "https://api.eolas.nz"
 
 # Spatial, but small enough that ONLY geometry trips the large-dataset guard.
 GEO_INFO = {

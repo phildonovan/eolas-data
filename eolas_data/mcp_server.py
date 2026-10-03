@@ -20,7 +20,7 @@ from typing import Any, Optional
 
 from mcp.server.fastmcp import FastMCP
 
-from .client import Client, SyncResult
+from .client import BASE_URL, Client, SyncResult
 from .exceptions import EolasError
 from .meta import _TABLE_META_KEYS
 
@@ -31,7 +31,7 @@ _MCP_SEARCH_CAP = 50
 mcp = FastMCP(
     "eolas",
     instructions=(
-        "Tools for the eolas.fyi statistical & geospatial data API (NZ + OECD). "
+        "Tools for the eolas.nz statistical & geospatial data API (NZ + OECD). "
         "Use eolas_search then eolas_info before fetching unknown dataset names. "
         "For whole datasets prefer eolas_sync (keeps a local file current) or "
         "eolas_download (one-shot bulk file). Use eolas_get only for small slices."
@@ -112,11 +112,11 @@ def _map_error(exc: Exception) -> str:
 
 @mcp.tool()
 def eolas_health() -> dict:
-    """Check api.eolas.fyi reachability (no API key required)."""
+    """Check api.eolas.nz reachability (no API key required)."""
     import requests
 
     try:
-        r = requests.get("https://api.eolas.fyi/health", timeout=10)
+        r = requests.get(f"{BASE_URL}/health", timeout=10)
         r.raise_for_status()
         body = r.json()
         return {"ok": True, "status_code": r.status_code, "body": _json_safe(body)}

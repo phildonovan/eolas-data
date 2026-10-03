@@ -1,4 +1,4 @@
-"""Live MCP integration — stdio session against api.eolas.fyi with a real API key.
+"""Live MCP integration — stdio session against api.eolas.nz with a real API key.
 
 Skipped in the default unit CI job (``pytest -m 'not integration'``).
 Enable locally or in the weekly smoke workflow::

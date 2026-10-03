@@ -18,7 +18,7 @@ from eolas_data import Client
 
 pytestmark = pytest.mark.skipif(not HAS_PYARROW, reason="pyarrow not installed")
 
-BASE = "https://api.eolas.fyi"
+BASE = "https://api.eolas.nz"
 
 
 @pytest.fixture()

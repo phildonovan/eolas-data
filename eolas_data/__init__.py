@@ -1,4 +1,4 @@
-"""eolas-data — Python client for the eolas.fyi statistical data API."""
+"""eolas-data — Python client for the eolas.nz statistical data API."""
 
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
@@ -28,7 +28,7 @@ from .reshape import pivot_longer, pivot_wider
 try:
     __version__ = _pkg_version("eolas-data")
 except PackageNotFoundError:  # pragma: no cover - uninstalled source checkout
-    __version__ = "1.12.1"
+    __version__ = "1.13.0"
 
 __all__ = [
     "Client",

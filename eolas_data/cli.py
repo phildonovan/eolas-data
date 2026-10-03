@@ -1,4 +1,4 @@
-"""eolas — command-line interface for the eolas.fyi data API.
+"""eolas — command-line interface for the eolas.nz data API.
 
 Designed for two audiences:
 - Humans typing in a terminal: rich tables, sensible defaults, --help everywhere.
@@ -28,6 +28,7 @@ import time
 from . import __version__
 from . import schedule as _schedule
 from .client import (
+    BASE_URL,
     Client,
     SyncResult,
     _KEYRING_SERVICE,
@@ -64,7 +65,7 @@ EXIT_USAGE = 64  # convention from sysexits.h
 app = typer.Typer(
     name="eolas",
     help=(
-        "CLI for the eolas.fyi statistical data API. Browse and fetch 1,400+ "
+        "CLI for the eolas.nz statistical data API. Browse and fetch 1,400+ "
         "official NZ statistical & geospatial datasets, plus OECD data for "
         "international comparisons. Pipes cleanly into jq, csvkit, etc."
     ),
@@ -213,11 +214,11 @@ def version() -> None:
 
 @app.command()
 def health() -> None:
-    """Quick reachability check against api.eolas.fyi/health."""
+    """Quick reachability check against api.eolas.nz/health."""
     import requests
 
     try:
-        r = requests.get("https://api.eolas.fyi/health", timeout=10)
+        r = requests.get(f"{BASE_URL}/health", timeout=10)
         r.raise_for_status()
     except Exception as e:
         _bail(f"health check failed: {e}", EXIT_API)
@@ -578,7 +579,7 @@ def download_cmd(
             )
         except BulkUpgradeRequired as e:
             err_console.print(f"[red]error:[/red] {e}")
-            err_console.print("[dim]→ https://eolas.fyi/pricing[/dim]")
+            err_console.print("[dim]→ https://eolas.nz/pricing[/dim]")
             raise typer.Exit(code=EXIT_AUTH)
         except BulkLicenceRestricted:
             live_fmt = _LIVE_DOWNLOAD_FORMAT_MAP[fmt_lower]
@@ -892,11 +893,11 @@ def sync_cmd(
             )
         except BulkUpgradeRequired as e:
             err_console.print(f"[red]error:[/red] {e}")
-            err_console.print("[dim]→ https://eolas.fyi/pricing[/dim]")
+            err_console.print("[dim]→ https://eolas.nz/pricing[/dim]")
             raise typer.Exit(code=EXIT_AUTH)
         except ChangesUpgradeRequired as e:
             err_console.print(f"[red]error:[/red] {e}")
-            err_console.print("[dim]→ https://eolas.fyi/pricing[/dim]")
+            err_console.print("[dim]→ https://eolas.nz/pricing[/dim]")
             raise typer.Exit(code=EXIT_AUTH)
         except BulkLicenceRestricted as e:
             err_console.print(f"[red]error:[/red] {e}")
@@ -982,7 +983,7 @@ def auth_set_key(
         "--key",
         prompt="API key",
         hide_input=True,
-        help="Your eolas.fyi API key. Will be saved to ~/.eolas/config.json (chmod 600).",
+        help="Your eolas.nz API key. Will be saved to ~/.eolas/config.json (chmod 600).",
     ),
 ) -> None:
     """Save your API key to ~/.eolas/config.json."""
@@ -1340,7 +1341,7 @@ def _run_integration(
         # Server's 403 detail flows through — usually the "Enterprise feature"
         # upgrade message. We surface it verbatim plus a pricing link.
         err_console.print(f"[red]error:[/red] {e}")
-        err_console.print("[dim]→ https://eolas.fyi/pricing[/dim]")
+        err_console.print("[dim]→ https://eolas.nz/pricing[/dim]")
         raise typer.Exit(code=EXIT_AUTH)
     except EolasError as e:
         _bail(str(e), _exit_for(e))

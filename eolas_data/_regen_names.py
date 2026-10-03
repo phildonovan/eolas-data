@@ -28,7 +28,7 @@ def regenerate() -> None:
     lines.append('"""')
     lines.append("Type stubs for dataset names.")
     lines.append("")
-    lines.append("Auto-generated from https://api.eolas.fyi/v1/datasets at release time.")
+    lines.append("Auto-generated from https://api.eolas.nz/v1/datasets at release time.")
     lines.append(f"Snapshot: {today} ({len(names)} datasets).")
     lines.append("Regenerate before each release with `python -m eolas_data._regen_names`.")
     lines.append("")

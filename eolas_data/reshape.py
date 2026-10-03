@@ -164,7 +164,7 @@ def _reshape_guard(df: pd.DataFrame, meta: dict, *, name: Optional[str] = None) 
             f"Cannot reshape {ds_name!r}: no `layout` metadata. eolas refuses to "
             "guess a date/period/value shape from column names — this is exactly "
             "the silent-wrongness class Dataset.plot_dataset() was removed for "
-            "in v1.3.0. See https://docs.eolas.fyi for the layout contract."
+            "in v1.3.0. See https://docs.eolas.nz for the layout contract."
         )
     layout = str(layout).strip().lower()
     if layout in ("feature", "entity"):

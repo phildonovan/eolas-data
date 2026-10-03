@@ -19,7 +19,7 @@ from eolas_data.meta import (
     truncation_message,
 )
 
-BASE = "https://api.eolas.fyi"
+BASE = "https://api.eolas.nz"
 
 RECORDS = [
     {"date": "2018-01-01", "value": 1.0},

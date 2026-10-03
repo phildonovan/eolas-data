@@ -16,7 +16,18 @@ from eolas_data.exceptions import (
     RateLimitError,
 )
 
-BASE = "https://api.eolas.fyi"
+BASE = "https://api.eolas.nz"
+
+
+def test_default_base_url_is_eolas_nz(monkeypatch):
+    monkeypatch.delenv("EOLAS_BASE_URL", raising=False)
+    from eolas_data.client import _default_base_url
+
+    assert _default_base_url() == "https://api.eolas.nz"
+    monkeypatch.setenv("EOLAS_BASE_URL", "https://api.example.test/")
+    assert _default_base_url() == "https://api.example.test"
+
+
 
 RECORDS = [
     {"date": "2023-01-01", "period": "2023Q1", "value": 100.0},
