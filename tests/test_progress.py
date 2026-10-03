@@ -20,7 +20,7 @@ from eolas_data import Client
 from eolas_data import cli as cli_module
 from eolas_data.cli import app
 
-BASE = "https://api.eolas.fyi"
+BASE = "https://api.eolas.nz"
 
 runner = CliRunner()
 

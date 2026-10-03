@@ -34,7 +34,7 @@ class BulkUpgradeRequired(APIError):
         self,
         message: str = (
             "Fresh bulk downloads are a Pro feature. Free accounts get the latest "
-            "monthly snapshot — see https://eolas.fyi/pricing."
+            "monthly snapshot — see https://eolas.nz/pricing."
         ),
     ):
         super().__init__(402, message)
@@ -59,7 +59,7 @@ class BulkNotYetAvailable(APIError):
         message: str = (
             "Monthly bulk snapshots are still rolling out for this dataset. "
             "Try again after the 1st of next month, or upgrade to Pro for "
-            "on-demand current snapshots — see https://eolas.fyi/pricing."
+            "on-demand current snapshots — see https://eolas.nz/pricing."
         ),
     ):
         super().__init__(503, message)
@@ -77,7 +77,7 @@ class ChangesUpgradeRequired(APIError):
         self,
         message: str = (
             "Changelog sync is a Pro feature. "
-            "Upgrade at https://eolas.fyi/pricing or use sync_bulk() instead."
+            "Upgrade at https://eolas.nz/pricing or use sync_bulk() instead."
         ),
     ):
         super().__init__(402, message)

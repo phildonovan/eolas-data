@@ -18,7 +18,7 @@ from eolas_data import Client, Dataset, SyncResult, pivot_longer, pivot_wider
 from eolas_data.exceptions import ReshapeError
 from eolas_data.meta import attach_meta
 
-BASE = "https://api.eolas.fyi"
+BASE = "https://api.eolas.nz"
 
 # ---------------------------------------------------------------------------
 # Fixtures — a wide RBNZ-style FX table and its long equivalent

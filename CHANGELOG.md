@@ -3,7 +3,15 @@
 All notable changes to `eolas-data` are recorded here. This project follows
 [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 1.13.0
+
+### Changed
+
+- **Default API host is `https://api.eolas.nz`.** `Client()`, the CLI, and the
+  MCP health check use it. `https://api.eolas.fyi` still serves; pass
+  `base_url=` or set `EOLAS_BASE_URL` before import to keep using it.
+  Signup, pricing, and docs links in errors and the README point at `eolas.nz`.
+  Mail still uses `support@eolas.fyi`.
 
 ### Fixed
 

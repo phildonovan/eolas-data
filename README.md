@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/eolas-data)](https://pypi.org/project/eolas-data/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Python client for the [eolas.fyi](https://eolas.fyi) statistical data API — 1,500+ official New Zealand statistical & geospatial datasets, plus OECD data for international comparisons, served as tidy `pandas` DataFrames (or `polars` / `geopandas` if you prefer).
+Python client for the [eolas.nz](https://eolas.nz) statistical data API — 1,500+ official New Zealand statistical & geospatial datasets, plus OECD data for international comparisons, served as tidy `pandas` DataFrames (or `polars` / `geopandas` if you prefer).
 
 _Coverage is New Zealand + OECD today. Australian sources are on the roadmap — not yet available; OECD data already includes Australia (and other OECD members) for cross-country comparisons._
 
@@ -35,7 +35,7 @@ client.search("cpi")   # expands aliases; surfaces rbnz_m1_prices before nz_cpi
 meta         = client.info("rbnz_m1_prices")
 ```
 
-Get an API key at <https://eolas.fyi/signup>. Free plan is 10 requests/month; Pro ($49/month) is unlimited.
+Get an API key at <https://eolas.nz/signup>. Free plan is 10 requests/month; Pro ($49/month) is unlimited.
 
 ## Quick setup (workstation)
 
@@ -155,8 +155,8 @@ this is on by default; `format=` (`"json"`/`"csv"`) is only for the rare case
 you want the raw text payload.
 
 For a columnar file (CLI), use `--format parquet --out FILE`; via the REST
-API directly, `?format=parquet`. Full benchmark: [docs.eolas.fyi → Python
-reference → Performance](https://docs.eolas.fyi/python/reference/).
+API directly, `?format=parquet`. Full benchmark: [docs.eolas.nz → Python
+reference → Performance](https://docs.eolas.nz/python/reference/).
 
 ## Bulk downloads — use `get_local()` for whole datasets
 
@@ -191,7 +191,7 @@ path = client.download_bulk("treasury_fiscal_spending", path="t.parquet")
 
 **Progress bars:** `get_local()` shows two phases in interactive sessions — a **download** byte bar while fetching from CDN, then a **read** spinner while Parquet/GeoParquet is loaded (often the slow part on multi-million-row geo datasets). Control with `progress=True` (both), `False` (neither), `"download"`, or `"read"`. Set `EOLAS_NO_PROGRESS=1` to suppress both in batch scripts. Cached files skip the download bar and print an informative message instead.
 
-CLI mirror: `eolas download <name>` for one-shot, `eolas sync <name> [--watch hourly]` for an incremental check. Full docs: [docs.eolas.fyi/bulk-downloads/](https://docs.eolas.fyi/bulk-downloads/).
+CLI mirror: `eolas download <name>` for one-shot, `eolas sync <name> [--watch hourly]` for an incremental check. Full docs: [docs.eolas.nz/bulk-downloads/](https://docs.eolas.nz/bulk-downloads/).
 
 ## Sync — always-fresh local copy
 
@@ -309,4 +309,4 @@ Before each release: `python -m eolas_data._regen_names` to refresh the dataset 
 ## License
 
 MIT — applies to this client software only. Dataset use is subject to each
-source's licence and your [eolas API plan](https://eolas.fyi/#pricing).
+source's licence and your [eolas API plan](https://eolas.nz/#pricing).

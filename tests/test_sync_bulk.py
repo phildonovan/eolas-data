@@ -22,7 +22,7 @@ from eolas_data.exceptions import (
 )
 
 runner = CliRunner()
-BASE = "https://api.eolas.fyi"
+BASE = "https://api.eolas.nz"
 
 # ---------------------------------------------------------------------------
 # Shared fixtures / constants

@@ -18,7 +18,7 @@ from eolas_data import cli as cli_module
 from eolas_data.cli import app
 
 runner = CliRunner()
-BASE = "https://api.eolas.fyi"
+BASE = "https://api.eolas.nz"
 
 DATASET_LIST = [
     {"name": "nz_cpi",  "title": "NZ Consumer Price Index",  "source": "Stats NZ"},

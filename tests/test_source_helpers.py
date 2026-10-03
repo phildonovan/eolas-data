@@ -8,7 +8,7 @@ import responses as resp_lib
 
 from eolas_data import Client
 
-BASE = "https://api.eolas.fyi"
+BASE = "https://api.eolas.nz"
 RECORDS = [
     {"date": "2023-01-01", "period": "2023Q1", "value": 100.0},
     {"date": "2023-04-01", "period": "2023Q2", "value": 101.5},

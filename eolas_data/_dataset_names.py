@@ -1,7 +1,7 @@
 """
 Type stubs for dataset names.
 
-Auto-generated from https://api.eolas.fyi/v1/datasets at release time.
+Auto-generated from https://api.eolas.nz/v1/datasets at release time.
 Snapshot: 2026-06-17 (1537 datasets).
 Regenerate before each release with `python -m eolas_data._regen_names`.
 

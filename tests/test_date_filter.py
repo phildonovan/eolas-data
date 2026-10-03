@@ -14,7 +14,7 @@ from eolas_data.meta import (
     resolve_date_bounds,
 )
 
-BASE = "https://api.eolas.fyi"
+BASE = "https://api.eolas.nz"
 
 TEMPORAL_INFO = {
     "name": "nz_cpi",
