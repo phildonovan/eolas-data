@@ -102,3 +102,19 @@ def test_set_key_survives_offline(monkeypatch, tmp_path):
     with resp_lib.RequestsMock():  # no registered URL -> connection error
         out = CliRunner().invoke(cli.app, ["auth", "set-key", "--key", "vs_k"])
     assert out.exit_code == 0 and "saved" in out.output
+
+
+@pytest.mark.parametrize("plan", ["trial", "free_legacy"])
+def test_trial_truncation_warning_says_slow_and_upgrade_for_bulk(plan):
+    from eolas_data.meta import truncation_message
+
+    msg = truncation_message("big", {"truncated": True, "row_cap": 50000, "plan": plan})
+    assert "50,000 rows" in msg and "slow" in msg and "bulk Parquet/CSV" in msg
+    assert "pricing" in msg
+
+
+def test_pro_truncation_warning_unchanged():
+    from eolas_data.meta import truncation_message
+
+    msg = truncation_message("big", {"truncated": True, "row_cap": 50000, "plan": "free"})
+    assert "get_local()/sync_bulk() for the whole table" in msg and "slow" not in msg
