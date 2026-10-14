@@ -20,6 +20,36 @@ class APIError(EolasError):
         super().__init__(f"HTTP {status_code}: {message}")
 
 
+class PlanError(APIError):
+    """The calling key's plan does not include this request.
+
+    Raised for the server's plan refusals, identified by ``X-Eolas-Error-Code``:
+
+    - ``bulk_not_in_plan`` (403): bulk Parquet/CSV and ``/changes`` are not in
+      the Pro trial (or a grandfathered Free key).
+    - ``trial_expired`` (402): the trial has ended; metadata still works.
+    - ``trial_soft_cap`` (429): the trial request allowance is used up (only
+      when the server enforces the cap).
+
+    Attributes:
+        code: The server error code above.
+        upgrade_url: Where to upgrade (https://eolas.nz/pricing).
+    """
+
+    def __init__(self, status_code: int, message: str, code: str = "",
+                 upgrade_url: str = "https://eolas.nz/pricing"):
+        self.code = code
+        self.upgrade_url = upgrade_url
+        super().__init__(status_code, message)
+
+
+class PlanNotice(UserWarning):
+    """Warning category for plan notices (trial row cap, end date, Free sunset).
+
+    Silence with ``warnings.filterwarnings("ignore", category=PlanNotice)``.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Bulk-download-specific exceptions (subclass APIError so callers that
 # catch APIError still catch these; callers that want to handle bulk refusals

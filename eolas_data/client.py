@@ -30,6 +30,8 @@ from .exceptions import (
     ChangesUpgradeRequired,
     EolasError,
     NotFoundError,
+    PlanError,
+    PlanNotice,
     RateLimitError,
     WatermarkExpired,
 )
@@ -85,6 +87,29 @@ class _TimeoutSession(requests.Session):
 # is the eolas convention (data-conventions.md §3, always that name); `geometry`
 # is what GeoParquet bulk artifacts carry as their WKB column.
 _GEOMETRY_COLUMNS = frozenset({"geometry_wkt", "geometry"})
+
+# Server plan refusals, keyed by X-Eolas-Error-Code (see PlanError).
+_PLAN_ERROR_CODES = frozenset({"bulk_not_in_plan", "trial_expired", "trial_soft_cap"})
+
+
+def _plan_error_from(resp) -> Optional[PlanError]:
+    """Return a PlanError when *resp* is a plan refusal, else None."""
+    code = (resp.headers.get("X-Eolas-Error-Code") or "").strip()
+    if resp.status_code not in (402, 403, 429) or code not in _PLAN_ERROR_CODES:
+        return None
+    try:
+        detail = resp.json().get("detail", "")
+    except Exception:
+        detail = ""
+    if not isinstance(detail, str) or not detail:
+        detail = resp.headers.get("X-Eolas-Notice") or {
+            "bulk_not_in_plan": "Bulk downloads and /changes are not included in your plan.",
+            "trial_expired": "Your eolas trial has ended. Metadata stays available.",
+            "trial_soft_cap": "Your trial request allowance is used up.",
+        }[code]
+    return PlanError(resp.status_code, f"{detail} (upgrade: https://eolas.nz/pricing)"
+                     if "pricing" not in detail else detail, code=code)
+
 
 _SIDECAR_SCHEMA_VERSION = 1
 _SIDECAR_SCHEMA_VERSION_CDC = 2
@@ -282,6 +307,35 @@ class Client:
         # every call).
         self._arrow_supported: Optional[bool] = None
         self._meta_cache: dict[str, dict] = {}
+        # Plan notices (trial row cap / end date / Free sunset) ride on every
+        # response as X-Eolas-Notice. Surface each distinct one once per Client
+        # as a PlanNotice warning — no extra request.
+        self._seen_notices: set[str] = set()
+        self._session.hooks["response"].append(self._on_response)
+
+    def _on_response(self, resp, *args, **kwargs):
+        try:
+            notice = resp.headers.get("X-Eolas-Notice")
+        except Exception:
+            return resp
+        if notice and notice not in self._seen_notices:
+            self._seen_notices.add(notice)
+            import warnings
+
+            warnings.warn(notice, PlanNotice, stacklevel=2)
+        return resp
+
+    def me(self) -> dict:
+        """Return the calling key's plan and limits (``GET /v1/me``).
+
+        Keys: ``plan`` (``"trial"``, ``"free_legacy"``, ``"expired"``,
+        ``"free"``, ``"pro"``, ``"enterprise"``), ``trial_ends_at``,
+        ``plan_sunset_at``, ``row_cap``, ``bulk``, ``changes``,
+        ``requests_used``, ``requests_allowance``, ``notice``, ``upgrade_url``.
+        """
+        resp = self._session.get(f"{self._base}/v1/me")
+        self._raise_for_status(resp)
+        return resp.json()
 
     def __repr__(self) -> str:
         masked = self._key[:8] + "..." if len(self._key) > 8 else self._key
@@ -1444,6 +1498,9 @@ class Client:
         resp = self._session.get(url, params=params)
         if resp.status_code == 200:
             return resp
+        plan_err = _plan_error_from(resp)
+        if plan_err is not None:
+            raise plan_err
         if resp.status_code == 402:
             try:
                 detail = resp.json().get("detail", "")
@@ -1733,6 +1790,9 @@ class Client:
         """Like ``_raise_for_status`` but handles the extra bulk refusal codes."""
         if resp.status_code == 200:
             return
+        plan_err = _plan_error_from(resp)
+        if plan_err is not None:
+            raise plan_err
         if resp.status_code == 402:
             try:
                 detail = resp.json().get("detail", "")
@@ -2916,6 +2976,9 @@ class Client:
     def _raise_for_status(resp: requests.Response) -> None:
         if resp.status_code == 200:
             return
+        plan_err = _plan_error_from(resp)
+        if plan_err is not None:
+            raise plan_err
         if resp.status_code == 401:
             raise AuthenticationError(
                 "Invalid or missing API key. Set the EOLAS_API_KEY environment "

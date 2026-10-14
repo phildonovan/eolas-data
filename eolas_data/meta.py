@@ -77,6 +77,15 @@ def truncation_message(
             f"; limit={int(user_limit)} returned the latest rows WITHIN that "
             "slice, not the dataset's most recent rows"
         )
+    if plan in ("trial", "free_legacy"):
+        # Bulk files aren't in the trial: don't point at get_local()/sync_bulk().
+        msg += (
+            ". Check df.eolas_meta['truncated']. On the trial, large pulls are "
+            "capped per request and must be paged with start=/end=, which is slow. "
+            "Upgrade to Pro for bulk Parquet/CSV downloads (get_local()/sync_bulk()): "
+            "https://eolas.nz/pricing."
+        )
+        return msg
     msg += (
         ". Check df.eolas_meta['truncated']. Use start=/end= to narrow, "
         "get_local()/sync_bulk() for the whole table, or upgrade at "

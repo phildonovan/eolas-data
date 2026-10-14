@@ -3,6 +3,25 @@
 All notable changes to `eolas-data` are recorded here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## 1.14.0
+
+### Added
+
+- **Pro trial notices.** The server's `X-Eolas-Notice` header (trial row cap and
+  end date, "large pulls are paginated and slow on trial", Free-plan sunset) is
+  now shown once per `Client` as a `PlanNotice` warning (a `UserWarning`
+  subclass). Silence it with
+  `warnings.filterwarnings("ignore", category=eolas_data.PlanNotice)`.
+- **`Client.me()`** returns the calling key's plan and limits from `GET /v1/me`.
+- **`eolas auth set-key` / `save-key`** print your plan and any trial notice after
+  saving. This is best effort: offline it is skipped silently, and
+  `EOLAS_NO_NOTICE=1` turns it off.
+- **`PlanError`** (subclass of `APIError`, with `.code` and `.upgrade_url`) is
+  raised for plan refusals. `bulk_not_in_plan` (403) means bulk and `/changes`
+  aren't in the trial. `trial_expired` (402) means the trial has ended and
+  metadata still works. `trial_soft_cap` (429) means the trial allowance is used
+  up. Existing `except APIError` handlers still catch it.
+
 ## 1.13.0
 
 ### Changed

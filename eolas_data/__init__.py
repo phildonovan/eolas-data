@@ -15,6 +15,8 @@ from .exceptions import (
     ChangesUpgradeRequired,
     EolasError,
     NotFoundError,
+    PlanError,
+    PlanNotice,
     RateLimitError,
     ReshapeError,
     WatermarkExpired,
@@ -28,7 +30,7 @@ from .reshape import pivot_longer, pivot_wider
 try:
     __version__ = _pkg_version("eolas-data")
 except PackageNotFoundError:  # pragma: no cover - uninstalled source checkout
-    __version__ = "1.13.0"
+    __version__ = "1.14.0"
 
 __all__ = [
     "Client",
@@ -40,6 +42,8 @@ __all__ = [
     "RateLimitError",
     "NotFoundError",
     "APIError",
+    "PlanError",
+    "PlanNotice",
     "BulkUpgradeRequired",
     "BulkLicenceRestricted",
     "BulkNotYetAvailable",
