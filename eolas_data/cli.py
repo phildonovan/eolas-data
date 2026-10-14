@@ -976,6 +976,31 @@ def _mask(key: str) -> str:
     return key[:8] + "…" if len(key) > 8 else key
 
 
+def _show_plan_notice(key: str) -> None:
+    """One-time plan message after saving a key (trial row cap / end date).
+
+    Best effort: any network or API failure is silent, so saving a key never
+    fails because of it. Set EOLAS_NO_NOTICE=1 to skip the lookup.
+    """
+    if os.environ.get("EOLAS_NO_NOTICE"):
+        return
+    try:
+        import warnings
+
+        from .client import Client
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            info = Client(api_key=key, timeout=(3, 5)).me()
+    except Exception:
+        return
+    notice = info.get("notice")
+    if notice:
+        typer.echo(f"plan: {info.get('plan')} - {notice}")
+    elif info.get("plan"):
+        typer.echo(f"plan: {info['plan']}")
+
+
 @auth_app.command("set-key")
 def auth_set_key(
     api_key: str = typer.Option(
@@ -991,6 +1016,7 @@ def auth_set_key(
     CONFIG_FILE.write_text(json.dumps({"api_key": api_key}, indent=2) + "\n")
     CONFIG_FILE.chmod(0o600)
     typer.echo(f"saved {CONFIG_FILE}")
+    _show_plan_notice(api_key)
 
 
 @auth_app.command("save-key")
@@ -1040,6 +1066,7 @@ def auth_save_key(
         _bail(f"keyring write failed: {exc}", EXIT_GENERIC)
 
     typer.echo(f"saved key {_mask(key)} to OS keyring (service={_KEYRING_SERVICE!r})")
+    _show_plan_notice(key)
 
 
 @auth_app.command("clear-key")
