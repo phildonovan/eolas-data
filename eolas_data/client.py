@@ -363,7 +363,7 @@ class Client:
         """Search datasets by name, title, or description.
 
         Common aliases are expanded (e.g. ``"HLFS"`` → labour-force datasets,
-        ``"OCR"`` → official cash rate series).
+        ``"OCR"`` → official cash rate datasets).
         """
         from .search import filter_datasets
 
