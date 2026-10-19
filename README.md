@@ -35,7 +35,7 @@ client.search("cpi")   # expands aliases; surfaces rbnz_m1_prices before nz_cpi
 meta         = client.info("rbnz_m1_prices")
 ```
 
-Get an API key at <https://eolas.nz/signup>. Free plan is 10 requests/month; Pro ($49/month) is unlimited.
+Get an API key at <https://eolas.nz/signup>. Every new account starts with a 14-day Pro trial, with no credit card: up to 50,000 rows per request and about 1,000 requests, without bulk downloads or the `/changes` feed. Pro (NZD $49/month) is unlimited. See [plans and pricing](https://eolas.nz/#pricing).
 
 ## Quick setup (workstation)
 
