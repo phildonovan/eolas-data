@@ -22,6 +22,15 @@ All notable changes to `eolas-data` are recorded here. This project follows
   metadata still works. `trial_soft_cap` (429) means the trial allowance is used
   up. Existing `except APIError` handlers still catch it.
 
+### Changed
+
+- **README and PyPI description match the current plans.** They described the
+  retired Free plan ("10 requests/month"). They now describe the 14-day Pro trial
+  (no card, 50,000 rows per request, about 1,000 requests, no bulk or `/changes`)
+  and Pro at NZD $49/month.
+- **"Datasets", not "series".** The `search()` docstring calls eolas datasets
+  "datasets". (#17)
+
 ## 1.13.0
 
 ### Changed
