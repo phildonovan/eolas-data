@@ -3,6 +3,14 @@
 All notable changes to `eolas-data` are recorded here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## 1.14.1
+
+### Changed
+
+- **README wording.** eolas is now described as a "data API" rather than a
+  "statistical data API". Source names such as Stats NZ are unchanged. No code
+  changes.
+
 ## 1.14.0
 
 ### Added
